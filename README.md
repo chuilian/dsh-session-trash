@@ -1,5 +1,12 @@
 # dsh-session-trash
 
+> **DSH 自研插件家族 · [索引与恢复顺序](https://github.com/chuilian/dsh-plugins-infra)**
+>
+> 本仓库是 6 个自研插件之一：`dsh-genui` · `dsh-prompt-polish` · `dsh-session-trash` ·
+> `dsh-artifacts` · `dsh-skill-veil` · `plugin-autoupdate`，全部为 `github.com/chuilian` 下的仓库库。
+>
+> 换机恢复顺序、profile「四处登记」的规则、以及 `lib/` 为什么必须入库，见索引仓库，本 README 不重复。
+
 > 给 DSH Web GUI 的会话删除功能：**两步确认 + 批量删除 + 可恢复回收站**。
 > DSH 本身只能归档会话，无法删除；本插件在不修改 DSH 源码的前提下补上这个能力。
 
