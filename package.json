@@ -1,0 +1,50 @@
+{
+  "name": "dsh-session-trash",
+  "version": "1.2.0",
+  "description": "Session deletion with a two-step confirmation, batch selection, and a recoverable recycle bin for the dsh Web GUI — adds the delete action DSH itself does not ship.",
+  "icon": "icon.svg",
+  "type": "module",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.0-rc.1"
+  },
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "engines": {
+      "dsh": ">=0.2.0-rc.1"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib/**/*.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "docs"
+  ],
+  "scripts": {
+    "test": "node --test --test-concurrency=1 \"tests/host/*.test.js\" \"tests/client/*.test.js\" \"tests/integration/*.test.js\"",
+    "test:host": "node --test --test-concurrency=1 \"tests/host/*.test.js\"",
+    "test:client": "node --test --test-concurrency=1 \"tests/client/*.test.js\"",
+    "test:render": "node --test --test-concurrency=1 \"tests/integration/*.test.js\""
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "session",
+    "delete",
+    "recycle-bin"
+  ],
+  "license": "MIT"
+}

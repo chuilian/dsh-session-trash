@@ -1,0 +1,27 @@
+# dsh-session-trash bundle patch.
+#
+# Applied as a profile bundle layer (the `dsh.bundle.patch` manifest field) on
+# top of dsh-base, and activated by listing this package in the profile's
+# `dsh.profile.bundles`:
+#
+#   dsh plugin add /absolute/path/to/dsh-session-trash
+#
+# The row is a bare plugin by package name. Its node half (exports ".") runs in
+# the Host process and registers the `/session-trash` routes; the `dsh.client`
+# declaration in package.json makes the browser half (exports "./client", served
+# at /plugins/dsh-session-trash/client.js) load in the Web GUI.
+#
+# Config is optional and read defensively; the defaults are:
+#   enabled: true
+#   root: <dshHome>/session-trash
+#   retentionDays: 30      # marks items expired in the panel; never auto-deletes
+#   maxBatch: 100
+#   actor: session-menu
+#
+# Uncomment to override any of them:
+- insert:
+    - id: session-trash
+      name: 'dsh-session-trash'
+      # config:
+      #   retentionDays: 14
+      #   maxBatch: 50
