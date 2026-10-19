@@ -278,7 +278,7 @@
 ## 5. 如何运行
 
 ```bash
-cd "/absolute/path/to/dsh-session-trash"
+cd "~/Desktop/AI/harness/插件/dsh-session-trash"
 
 # 全部（137 必测 + 3 可选项）。串行执行是刻意选择：默认的并行文件执行在
 # 六文件规模下会间歇性不退出（子集与串行都稳定），串行总耗时仍约 2 秒。
@@ -286,7 +286,7 @@ node --test --test-concurrency=1 "tests/host/*.test.js" "tests/client/*.test.js"
 
 # 真实 React 渲染检查（可选，需在别处装 react@18.3.1 + react-dom@18.3.1）
 mkdir -p /tmp/react-check && cd /tmp/react-check && npm install react@18.3.1 react-dom@18.3.1
-cd "/absolute/path/to/dsh-session-trash"
+cd "~/Desktop/AI/harness/插件/dsh-session-trash"
 NODE_PATH=/tmp/react-check/node_modules node --test "tests/integration/*.test.js"
 
 # 分层

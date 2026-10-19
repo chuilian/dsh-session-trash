@@ -31,27 +31,37 @@ DSH 侧栏的会话菜单只有 **置顶 / 重命名 / 分叉 / 归档** 四项�
 
 ## 这个插件装在哪里
 
-插件的**真实文件**在 DSH 自己的数据目录里，不在任何工作区/项目目录下：
+2026-10-19 起，本插件与其他五个自研插件统一住在**工作区**，profile 用 `link:` 直连：
 
 ```
-~/.dsh/plugins/dsh-session-trash/          ← 真实文件（源码即运行代码，无构建步骤）
-~/.dsh/profiles/desktop/package.json       ← 声明 link: 指向上面这个路径
+~/Desktop/AI/harness/插件/dsh-session-trash/            ← 真实文件（源码即运行代码，无构建步骤）
+~/.dsh/profiles/desktop/package.json                     ← 声明 link: 指向上面这个路径
+~/.dsh/profiles/desktop/pnpm-lock.yaml                   ← importers 段同步写 link:
 ~/.dsh/profiles/desktop/node_modules/dsh-session-trash   ← 符号链接 → 上面这个路径
 ```
 
-因此**删掉工作区或任何项目目录都不影响插件**，app 的解析链路完全不经过它们。
-
-> 如果你手上还有指向工作区的旧路径（例如 `/absolute/path/to/dsh-session-trash`），那里现在是一个指向真实位置的符号链接，
-> 所以旧路径依然可用，且**只有一份文件**、不会出现两份拷贝互相漂移。
+早先它在 `~/.dsh/plugins/dsh-session-trash/`，现已搬进工作区统一管理；旧位置不再存在。
 
 **DSH 自己的备份范围**（`~/.dsh/profile-backups/`）只覆盖 profile 的**配置**：`cordis.yml`、`package.json`、
-`pnpm-lock.yaml`、`compatibility.json`。它**不备份** `node_modules`，也不备份任何插件源码。
-所以「不被工作区删除牵连」已由上面的位置解决，但「真的持久化」仍然建议对这个目录做版本管理：
+`pnpm-lock.yaml`、`compatibility.json`。它**不备份** `node_modules`，也不备份任何插件源码 ——
+所以「删掉工作区就不影响插件」这个说法在 2026-10-19 之后**不再成立**：现在删掉工作区，
+profile 的软链就会指向空路径，插件直接加载失败。持久化与迁移由 GitHub 仓库
+`chuilian/dsh-session-trash` 承担（源码含 `lib/` 全部入库，克隆下来即可直接运行，无需安装依赖）。
+
+### 改位置 / 恢复
+
+不要手工建软链 —— 登记分散在四处，漏改任何一处都会在下次 `pnpm install` 时被顶掉。用 infra 仓库的
+`relink.sh` 统一改写，`verify.sh` 做 41 项只读复查：
 
 ```bash
-cd ~/.dsh/plugins/dsh-session-trash
-git init && git add -A && git commit -m "dsh-session-trash 1.0.0"
+cd ~/Desktop/AI/harness/插件/dsh-plugins-infra
+./tools/relink.sh --all --to workspace --dry-run   # 先看要改什么（零写入）
+./tools/relink.sh --all --to workspace             # 真改（自动备份到 ~/.dsh/backups/profile/）
+./tools/verify.sh                                 # 期望 41 项全 ok
 ```
+
+工作区换了位置就加 `--workspace <新路径>`；恢复别处丢失的 profile 加 `--profile <名字>`。
+换机恢复的完整步骤见 `dsh-plugins-infra/INSTALL.md`。
 
 ## 安装
 
@@ -61,17 +71,25 @@ git init && git add -A && git commit -m "dsh-session-trash 1.0.0"
 - Node.js `>= 22.19`（DSH 自带运行时即满足）
 - **无需联网**：插件零运行时依赖，宿主端只用 Node 内置模块，浏览器端只用 DSH 平台自带的模块
 
-### 方式一：用 DSH 插件管理器（推荐）
+### 方式一：用 infra 仓库的 relink.sh（推荐，本机唯一可靠路径）
 
 ```bash
-dsh plugin add "/absolute/path/to/dsh-session-trash"
+cd ~/Desktop/AI/harness/插件/dsh-plugins-infra
+./tools/relink.sh --all --to workspace --dry-run   # 先看要改哪四处（零写入）
+./tools/relink.sh --all --to workspace             # 真改（自动备份到 ~/.dsh/backups/profile/）
+./tools/verify.sh                                  # 42 项复查
 ```
 
-插件管理器会把它写入当前 profile 的依赖与 `dsh.profile.bundles`，并默认启用其 bundle。
+工作区换了位置就加 `--workspace <新路径>`；换 profile 加 `--profile <名字>`。
 
-也可以在 GUI 里操作：**侧栏 → 插件 → 安装插件**，填入上面这个绝对路径。
+> ⚠️ **不要用 `dsh plugin add`，也不要在装完之后跑 `pnpm install`。**
+> 本机的插件管理器命令会报 `ERR_PNPM_RESOLUTION_POLICY_VIOLATIONS_UNHANDLED`
+> （`minimumReleaseAge` 策略缺 `no handleResolutionPolicyViolations` 回调），失败发生在写盘之前、
+> 零副作用，但它意味着这条路根本走不通。而 `pnpm install` 更危险：它会按 lock 重算
+> `node_modules`，把 `link:` 软链顶回 registry 版本 —— `dsh-genui` 真的因此被换回 0.12.0，
+> 并被塞进一棵 428MB 的依赖树。
 
-### 方式二：手工编辑 profile
+### 方式二：手工编辑 profile（只在你不想用工具时）
 
 编辑 `~/.dsh/profiles/<profile>/package.json`：
 
@@ -91,7 +109,15 @@ dsh plugin add "/absolute/path/to/dsh-session-trash"
 }
 ```
 
-然后在 profile 目录执行 `pnpm install`（使用 DSH 自带的 pnpm），并重启 DSH。
+**但只改这里是不够的。** `package.json` 之外还必须同步两处，漏任何一处都会被下一次
+`pnpm install` 顶掉：
+
+1. `pnpm-lock.yaml` 的 `importers` 段写两行
+   `specifier: link:/absolute/path/to/dsh-session-trash` +
+   `version: link:<相对 profile 的路径>`
+2. `node_modules/dsh-session-trash` 建成指向工作区的**相对**软链
+
+然后重启 DSH。不跑 `pnpm install`。想省事就直接用方式一。
 
 ### 安装后验证
 
@@ -346,7 +372,7 @@ rm -rf ~/.dsh/session-trash
 ## 开发
 
 ```bash
-cd "/absolute/path/to/dsh-session-trash"
+cd "~/Desktop/AI/harness/插件/dsh-session-trash"
 
 # 全部测试（137 个必测项，无需 npm install；串行执行以保证确定性）
 node --test --test-concurrency=1 "tests/host/*.test.js" "tests/client/*.test.js" "tests/integration/*.test.js"
