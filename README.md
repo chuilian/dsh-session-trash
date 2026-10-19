@@ -31,33 +31,35 @@ DSH 侧栏的会话菜单只有 **置顶 / 重命名 / 分叉 / 归档** 四项�
 
 ## 这个插件装在哪里
 
-2026-10-19 起，本插件与其他五个自研插件统一住在**工作区**，profile 用 `link:` 直连：
+本插件与其他自研插件统一住在 **`~/.dsh/plugins/`**，profile 用 `link:` 直连，不经过任何中间目录：
 
 ```
-~/Desktop/AI/harness/插件/dsh-session-trash/            ← 真实文件（源码即运行代码，无构建步骤）
+~/.dsh/plugins/dsh-session-trash/                        ← 真实文件 + git 仓（源码即运行代码，无构建步骤）
 ~/.dsh/profiles/desktop/package.json                     ← 声明 link: 指向上面这个路径
 ~/.dsh/profiles/desktop/pnpm-lock.yaml                   ← importers 段同步写 link:
 ~/.dsh/profiles/desktop/node_modules/dsh-session-trash   ← 符号链接 → 上面这个路径
+~/.dsh/plugins/dsh-session-trash/              ← 可选入口软链，删掉不影响运行
 ```
 
-早先它在 `~/.dsh/plugins/dsh-session-trash/`，现已搬进工作区统一管理；旧位置不再存在。
+git 仓就住在 `~/.dsh/plugins/dsh-session-trash/.git`，所以「删掉工作区」只删掉入口软链，
+插件本体和版本历史都在。2026-10-19 曾在工作区短暂停留一天，当晚搬回 `~/.dsh/plugins/`。
 
 **DSH 自己的备份范围**（`~/.dsh/profile-backups/`）只覆盖 profile 的**配置**：`cordis.yml`、`package.json`、
 `pnpm-lock.yaml`、`compatibility.json`。它**不备份** `node_modules`，也不备份任何插件源码 ——
-所以「删掉工作区就不影响插件」这个说法在 2026-10-19 之后**不再成立**：现在删掉工作区，
-profile 的软链就会指向空路径，插件直接加载失败。持久化与迁移由 GitHub 仓库
-`chuilian/dsh-session-trash` 承担（源码含 `lib/` 全部入库，克隆下来即可直接运行，无需安装依赖）。
+所以插件源码的持久化由 GitHub 仓库 `chuilian/dsh-session-trash` 承担（源码含 `lib/` 全部入库，
+克隆下来即可直接运行，无需安装依赖）。反过来，**删掉工作区的软链入口对插件没有任何影响**：
+profile 的软链直连 `~/.dsh/plugins/dsh-session-trash/`，不经过工作区。
 
 ### 改位置 / 恢复
 
 不要手工建软链 —— 登记分散在四处，漏改任何一处都会在下次 `pnpm install` 时被顶掉。用 infra 仓库的
-`relink.sh` 统一改写，`verify.sh` 做 41 项只读复查：
+`relink.sh` 统一改写，`verify.sh` 做 44 项只读复查：
 
 ```bash
-cd ~/Desktop/AI/harness/插件/dsh-plugins-infra
-./tools/relink.sh --all --to workspace --dry-run   # 先看要改什么（零写入）
-./tools/relink.sh --all --to workspace             # 真改（自动备份到 ~/.dsh/backups/profile/）
-./tools/verify.sh                                 # 期望 41 项全 ok
+cd ~/.dsh/plugins/dsh-plugins-infra
+./tools/relink.sh --all --dry-run   # 先看要改什么（零写入）
+./tools/relink.sh --all             # 真改（自动备份到 ~/.dsh/backups/profile/）
+./tools/verify.sh                   # 期望 44 项全 ok
 ```
 
 工作区换了位置就加 `--workspace <新路径>`；恢复别处丢失的 profile 加 `--profile <名字>`。
@@ -74,7 +76,7 @@ cd ~/Desktop/AI/harness/插件/dsh-plugins-infra
 ### 方式一：用 infra 仓库的 relink.sh（推荐，本机唯一可靠路径）
 
 ```bash
-cd ~/Desktop/AI/harness/插件/dsh-plugins-infra
+cd ~/.dsh/plugins/dsh-plugins-infra
 ./tools/relink.sh --all --to workspace --dry-run   # 先看要改哪四处（零写入）
 ./tools/relink.sh --all --to workspace             # 真改（自动备份到 ~/.dsh/backups/profile/）
 ./tools/verify.sh                                  # 42 项复查
@@ -372,7 +374,7 @@ rm -rf ~/.dsh/session-trash
 ## 开发
 
 ```bash
-cd "~/Desktop/AI/harness/插件/dsh-session-trash"
+cd "~/.dsh/plugins/dsh-session-trash"
 
 # 全部测试（137 个必测项，无需 npm install；串行执行以保证确定性）
 node --test --test-concurrency=1 "tests/host/*.test.js" "tests/client/*.test.js" "tests/integration/*.test.js"
