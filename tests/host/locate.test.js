@@ -156,7 +156,7 @@ test("a symlinked session directory is not accepted as the target", async (t) =>
   assert.equal(resolved.code, "unsafe-location");
 });
 
-test("a symlink pointing inside the store is refused as not-found", async (t) => {
+test("a symlink pointing inside the store is refused as not-visible", async (t) => {
   const { sessionRoot, cwd } = await fixture(t);
   const projectDir = path.join(sessionRoot, projectKey(cwd));
   const target = path.join(projectDir, `${SESSION}-real`);
@@ -167,7 +167,10 @@ test("a symlink pointing inside the store is refused as not-found", async (t) =>
   const persistence = fakePersistence({ root: sessionRoot, sessionCwd: new Map([[SESSION, cwd]]) });
   const resolved = await resolveSessionDir({ sessionId: SESSION, persistence });
   assert.equal(resolved.ok, false, "a symlink is never the delete target, wherever it points");
-  assert.equal(resolved.code, "not-found");
+  // The session's files are there, behind the link. Reporting "not found" would
+  // let the caller clear the row as if it had no files left.
+  assert.equal(resolved.code, "not-visible");
+  assert.equal(resolved.exists, true);
 });
 
 test("resolveSessionDir tolerates a throwing stat()", async (t) => {
@@ -188,7 +191,9 @@ test("isResident reflects the sessions registry", () => {
   const ctx = { get: (name) => (name === "sessions" ? fakeSessions([SESSION]) : undefined) };
   assert.equal(isResident(ctx, SESSION), true);
   assert.equal(isResident(ctx, "session-22222222-2222-3333-4444-555555555555"), false);
-  assert.equal(isResident({ get: () => undefined }, SESSION), false);
+  // A registry that is missing cannot rule residency out, so the probe fails
+  // closed: "possibly resident" is the answer that cannot lose data.
+  assert.equal(isResident({ get: () => undefined }, SESSION), true);
   assert.equal(
     isResident(
       {
@@ -198,7 +203,7 @@ test("isResident reflects the sessions registry", () => {
       },
       SESSION
     ),
-    false
+    true
   );
 });
 

@@ -343,11 +343,19 @@ test("pure helpers: consent and activity flattening", async () => {
   assert.equal(needsConsent({ resident: true }), true);
   assert.equal(needsConsent({ activity: [{ kind: "turn" }] }), true);
   assert.equal(needsConsent({ activity: [] }), false);
+  // An unknown activity state is not an idle one: the client must ask for
+  // consent instead of pretending the session is quiet.
+  assert.equal(needsConsent({ activityKnown: false }), true);
+  assert.equal(needsConsent({ activityKnown: true, activity: [] }), false);
   assert.deepEqual(activityRows([{ kind: "turn" }, { kind: "job", items: [{ id: "1", label: "build" }] }]), [
     { kind: "turn", label: "turn" },
     { kind: "job", label: "build" }
   ]);
   assert.deepEqual(activityRows(undefined), []);
+  // The label shown for an unknown activity state must not claim that work is in
+  // progress; the host only knows that it could not find out.
+  assert.equal(exports.__test.dictionaries.zh["dialog.activityUnknown"], "无法确认该会话是否仍有正在进行的工作");
+  assert.equal(exports.__test.dictionaries.en["dialog.activityUnknown"], "Cannot confirm whether work is still in progress");
 });
 
 test("pure helpers: selection summary carries real sizes", async () => {

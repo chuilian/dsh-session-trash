@@ -436,6 +436,26 @@ test("the rendered markup carries the real content, not an empty shell", async (
   assert.match(emptyMarkup, /panel\.empty/);
   assert.match(emptyMarkup, /panel\.emptyHint/);
 
+  // A bin that holds only damaged items is not empty: the damaged entry has to be
+  // listed, selectable and purgeable, and the bulk bar has to stay reachable.
+  store.actions.setBin({
+    status: "ready",
+    items: [],
+    broken: [{ trashId: "t-20260104T000000Z-deadbeef", state: "orphan", error: "item directory has no manifest" }],
+    stats: { count: 0, bytes: 0, retentionDays: 30, brokenCount: 1 },
+    error: null,
+    selected: [],
+    log: []
+  });
+  const brokenMarkup = server.renderToStaticMarkup(
+    react.createElement(panel.component, { t: t_, useStore: (selector) => selector(store.getSnapshot()) })
+  );
+  assert.doesNotMatch(brokenMarkup, /panel\.empty/, "a bin with damaged items is not empty");
+  assert.match(brokenMarkup, /panel\.brokenItem/, "the damaged item must be listed as a row of its own");
+  assert.match(brokenMarkup, /orphan/, "the damaged state must be shown");
+  assert.match(brokenMarkup, /type="checkbox"/, "a damaged item must be selectable");
+  assert.match(brokenMarkup, /panel\.purgeAll/, "the bulk bar must stay reachable");
+
   // A failed bin read is surfaced, not swallowed.
   store.actions.setBin({ status: "error", items: [], broken: [], stats: null, error: "boom", selected: [], log: [] });
   const errorMarkup = server.renderToStaticMarkup(
@@ -469,6 +489,24 @@ test("the rendered markup carries the real content, not an empty shell", async (
   assert.doesNotMatch(pickMarkup, /<input[^>]*disabled/, "no candidate checkbox may be disabled — the user decides");
   assert.match(pickMarkup, /Residue/, "the fileless residue row must still be listed");
   assert.match(pickMarkup, /dialog\.gone/, "the fileless row must still say why it has nothing behind it");
+
+  // An unknown activity state is not "work in progress": the host could not find
+  // out, and the row has to say exactly that.
+  store.actions.setDialog({
+    mode: "batch",
+    sessionIds: ["u"],
+    titleById: { u: "Unknown" },
+    plans: [{ sessionId: "u", deletable: true, exists: true, bytes: 10, resident: false, activity: [], activityKnown: false }],
+    selectedIds: ["u"],
+    pending: false,
+    error: null,
+    root: "/tmp/bin"
+  });
+  const unknownMarkup = server.renderToStaticMarkup(
+    react.createElement(overlay.component, { t: t_, useStore: (selector) => selector(store.getSnapshot()) })
+  );
+  assert.match(unknownMarkup, /dialog\.activityUnknown/, "an unknown activity state needs its own label");
+  assert.doesNotMatch(unknownMarkup, /dialog\.activity(?!Unknown)/, "an unknown state must not be shown as work in progress");
 });
 
 test("the picker's controls reach the store and the host", async (t) => {

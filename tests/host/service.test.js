@@ -362,8 +362,10 @@ test("a fileless session still needs consent before it is cleared", async (t) =>
 
 test("without a persistence service the service reports nothing to delete", async (t) => {
   const { service } = await fixture(t);
-  // Point the service at a context whose persistence is absent.
-  const bare = new SessionTrashService(fakeCtx({}), { store: service.store });
+  // Point the service at a context whose persistence is absent. The sessions
+  // registry stays: a missing one cannot rule residency out, so the probe would
+  // fail closed and ask for the stop consent.
+  const bare = new SessionTrashService(fakeCtx({ sessions: fakeSessions([]) }), { store: service.store });
   const status = await bare.status();
   assert.equal(status.canDelete, false);
   const outcome = await bare.deleteSessions({ sessionIds: [SESSION_A] });

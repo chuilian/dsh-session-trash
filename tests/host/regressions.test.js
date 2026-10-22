@@ -467,11 +467,11 @@ test("R16: a symlinked source inside the store is still refused", async (t) => {
  * client drop its main reference, which lets the host dispose it. That causal chain
  * is what the release path depends on, so the fake reproduces it.
  */
-async function releaseFixture(t, { releaseOnArchive = true } = {}) {
+async function releaseFixture(t, { releaseOnArchive = true, waterfall } = {}) {
   const root = await tempDir(t);
   const sessionRoot = path.join(root, "sessions");
   const cwd = "/tmp/project";
-  await seedSession({ root: sessionRoot, cwd, sessionId: SESSION_A, contents: "work\n" });
+  const sessionDir = await seedSession({ root: sessionRoot, cwd, sessionId: SESSION_A, contents: "work\n" });
   const sessions = fakeSessions([SESSION_A]);
   const registry = fakeWorkspaceRegistry({ workspaces: [{ path: cwd, sessionIds: [SESSION_A] }] });
   if (releaseOnArchive) {
@@ -490,11 +490,11 @@ async function releaseFixture(t, { releaseOnArchive = true } = {}) {
       sessions,
       sessionController: { listState: { list: async () => [] } }
     },
-    { waterfall: () => [{ kind: "turn" }] }
+    { waterfall: waterfall ?? (() => [{ kind: "turn" }]) }
   );
   const store = new TrashStore({ root: path.join(root, "bin"), logger: recordingLogger() });
   const service = new SessionTrashService(ctx, { store });
-  return { service, store, ctx, registry, sessions, sessionRoot, cwd };
+  return { service, store, ctx, registry, sessions, sessionRoot, cwd, sessionDir };
 }
 
 test("R17: a running session the view holds can still be deleted (release then move)", async (t) => {
@@ -642,4 +642,60 @@ test("R24: restoring a forced delete clears the archive id it left behind", asyn
   assert.equal(restored.restored, 1, JSON.stringify(restored.results));
   assert.deepEqual(registry.archivedSessionIds, [], "the recorded state (not archived) is restored");
   assert.equal((await store.list()).length, 0, "the bin item is gone");
+});
+
+test("T1: a throwing store.trash rolls back the forced-release archive", async (t) => {
+  // The defect: rollback lived only on the `trashed.ok === false` branch, so a
+  // store that threw after the archive left the session hidden from the sidebar
+  // with its files still on disk. The move must be all-or-nothing.
+  const { service, registry, sessionDir } = await releaseFixture(t, { releaseOnArchive: false });
+  service.store.trash = async () => {
+    throw new Error("disk full");
+  };
+  const outcome = await service.deleteSessions({
+    sessionIds: [SESSION_A],
+    stopActivity: true,
+    force: true,
+    waitForReleaseMs: 80
+  });
+  assert.equal(outcome.results[0].ok, false);
+  assert.equal(outcome.results[0].code, "internal");
+  assert.deepEqual(registry.archivedSessionIds, [], "the release archive is rolled back");
+  await fs.access(sessionDir);
+  assert.equal((await service.store.list()).length, 0, "nothing reached the bin");
+});
+
+test("T2: a manifest-less trash directory is visible and purge-all removes it", async (t) => {
+  // The defect: the store reported an orphan, the service dropped it, so it never
+  // appeared in the bin and the `["*"]` sentinel could not clean it up.
+  const { service, store } = await releaseFixture(t);
+  const orphan = path.join(store.root, "items", "t-20260101T000000Z-deadbeef");
+  await fs.mkdir(orphan, { recursive: true });
+  await fs.writeFile(path.join(orphan, "payload"), "bytes");
+  const listed = await service.list();
+  assert.ok(
+    listed.broken.some((row) => row.trashId === "t-20260101T000000Z-deadbeef" && row.state === "orphan"),
+    "the orphan is visible as broken"
+  );
+  const purged = await service.purgeSessions({ trashIds: ["*"], acknowledge: true });
+  assert.equal(purged.purged, 1, JSON.stringify(purged.results));
+  await assert.rejects(fs.access(orphan), "the orphan directory is gone");
+});
+
+test("T3: an unavailable activity probe is fail-closed, never idle", async (t) => {
+  // The defect: `[]` on a probe failure skipped the stop consent, so a session
+  // with live work could be moved without the user ever being asked.
+  const { service } = await releaseFixture(t, {
+    releaseOnArchive: false,
+    waterfall: () => {
+      throw new Error("probe unavailable");
+    }
+  });
+  const plan = (await service.plan([SESSION_A]))[0];
+  assert.equal(plan.activityKnown, false);
+  assert.ok(plan.blockers.includes("session-activity-unknown"));
+  const refused = await service.deleteSessions({ sessionIds: [SESSION_A], waitForReleaseMs: 80 });
+  assert.equal(refused.deleted, 0);
+  assert.equal(refused.results[0].code, "session-active");
+  assert.match(refused.results[0].message, /无法确认/);
 });
