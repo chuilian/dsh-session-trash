@@ -1,11 +1,5 @@
 # dsh-session-trash
 
-> **DSH 自研插件家族 · [索引与恢复顺序](https://github.com/chuilian/dsh-plugins-infra)**
->
-> 本仓库是 6 个自研插件之一：`dsh-genui` · `dsh-prompt-polish` · `dsh-session-trash` ·
-> `dsh-artifacts` · `dsh-skill-veil` · `plugin-autoupdate`，全部为 `github.com/chuilian` 下的仓库库。
->
-> 换机恢复顺序、profile「四处登记」的规则、以及 `lib/` 为什么必须入库，见索引仓库，本 README 不重复。
 
 > 给 DSH Web GUI 的会话删除功能：**两步确认 + 批量删除 + 可恢复回收站**。
 > DSH 本身只能归档会话，无法删除；本插件在不修改 DSH 源码的前提下补上这个能力。
@@ -56,14 +50,14 @@ profile 的软链直连 `~/.dsh/plugins/dsh-session-trash/`，不经过工作区
 `relink.sh` 统一改写，`verify.sh` 做 44 项只读复查：
 
 ```bash
-cd ~/.dsh/plugins/dsh-plugins-infra
+cd ~/.dsh/plugins/_tooling
 ./tools/relink.sh --all --dry-run   # 先看要改什么（零写入）
 ./tools/relink.sh --all             # 真改（自动备份到 ~/.dsh/backups/profile/）
 ./tools/verify.sh                   # 期望 44 项全 ok
 ```
 
 工作区换了位置就加 `--workspace <新路径>`；恢复别处丢失的 profile 加 `--profile <名字>`。
-换机恢复的完整步骤见 `dsh-plugins-infra/INSTALL.md`。
+换机恢复的完整步骤见 `_tooling/INSTALL.md`。
 
 ## 安装
 
@@ -76,7 +70,7 @@ cd ~/.dsh/plugins/dsh-plugins-infra
 ### 方式一：用 infra 仓库的 relink.sh（推荐，本机唯一可靠路径）
 
 ```bash
-cd ~/.dsh/plugins/dsh-plugins-infra
+cd ~/.dsh/plugins/_tooling
 ./tools/relink.sh --all --to workspace --dry-run   # 先看要改哪四处（零写入）
 ./tools/relink.sh --all --to workspace             # 真改（自动备份到 ~/.dsh/backups/profile/）
 ./tools/verify.sh                                  # 42 项复查
