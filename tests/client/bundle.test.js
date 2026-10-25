@@ -421,15 +421,20 @@ test("pure helpers: batch candidates exclude blanks and subagent children", asyn
   const { exports } = await loadBundle();
   const { batchCandidates } = exports.__test;
   const rows = batchCandidates({
-    ids: ["a", "b", "c", "d"],
+    ids: ["a", "b", "c", "d", "e"],
     byId: {
       a: { id: "a", displayTitle: "Alpha", blank: false },
       b: { id: "b", displayTitle: "Blank", blank: true },
-      c: { id: "c", displayTitle: "Child", parentId: "a" },
-      d: { id: "d", displayTitle: "Delta", running: true }
+      // A subagent child: DSH marks it with `origin`, exactly as its own
+      // `sessionVisible` rule reads.
+      c: { id: "c", displayTitle: "Child", parentId: "a", origin: "subagent" },
+      d: { id: "d", displayTitle: "Delta", running: true },
+      // An ordinary fork: it carries a parent too, but it is a conversation the
+      // user may mean to delete, so the picker must keep it.
+      e: { id: "e", displayTitle: "Fork", parentId: "a" }
     }
   });
-  assert.deepEqual(rows.map((row) => row.sessionId), ["a", "d"]);
+  assert.deepEqual(rows.map((row) => row.sessionId), ["a", "d", "e"]);
   assert.equal(rows[1].running, true);
   assert.deepEqual(batchCandidates(undefined), []);
 });
@@ -980,5 +985,104 @@ test("a selection longer than one batch is deleted in several requests", async (
   } finally {
     globalThis.fetch = originalFetch;
     storeInstance.actions.setNotice(null);
+  }
+});
+
+test("a restore selection longer than one batch is sent in several requests", async () => {
+  // The defect: the restore sent the whole selection in one request, and the
+  // host refuses a request carrying more ids than its batch cap — so a bin
+  // holding more items than one request accepts could not be restored at all.
+  const { exports } = await loadBundle();
+  const { storeInstance, restoreSelected } = exports.__test;
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const body = options.body === undefined ? {} : JSON.parse(options.body);
+    calls.push({ url: String(url), body });
+    const respond = (value) => ({ status: 200, json: async () => ({ ok: true, value }) });
+    if (String(url).endsWith("/restore")) {
+      return respond({
+        results: body.trashIds.map((trashId) => ({ trashId, ok: true })),
+        restored: body.trashIds.length,
+        failed: 0
+      });
+    }
+    return respond({});
+  };
+  try {
+    // The host's cap, as the listing reported it.
+    storeInstance.actions.patchBin({ maxBatch: 2 });
+    await restoreSelected(["t-a", "t-b", "t-c"]);
+    const restores = calls.filter((call) => call.url.endsWith("/restore"));
+    assert.equal(restores.length, 2, "the cap is respected instead of the whole restore being refused");
+    assert.deepEqual(
+      restores.map((call) => call.body.trashIds),
+      [["t-a", "t-b"], ["t-c"]]
+    );
+    assert.equal(storeInstance.getSnapshot().bin.error, null, "the selection was not refused");
+  } finally {
+    globalThis.fetch = originalFetch;
+    storeInstance.actions.setNotice(null);
+    storeInstance.actions.patchBin({ maxBatch: 100 });
+  }
+});
+
+test("a purge selection longer than one batch is sent in several requests", async () => {
+  // The same cap applies to the purge, and the `["*"]` sentinel must stay one
+  // request: it names the bin's own contents, not a caller-chosen set.
+  const { exports } = await loadBundle();
+  const { storeInstance, confirmPurge } = exports.__test;
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const body = options.body === undefined ? {} : JSON.parse(options.body);
+    calls.push({ url: String(url), body });
+    const respond = (value) => ({ status: 200, json: async () => ({ ok: true, value }) });
+    if (String(url).endsWith("/purge")) {
+      return respond({
+        results: body.trashIds.map((trashId) => ({ trashId, ok: true, freedBytes: 1 })),
+        purged: body.trashIds.length,
+        freedBytes: body.trashIds.length
+      });
+    }
+    return respond({});
+  };
+  try {
+    storeInstance.actions.patchBin({ maxBatch: 2 });
+    storeInstance.actions.setPurge({
+      trashIds: ["t-a", "t-b", "t-c"],
+      count: 3,
+      bytes: 3,
+      acknowledged: true,
+      pending: false,
+      error: null
+    });
+    await confirmPurge();
+    const purges = calls.filter((call) => call.url.endsWith("/purge"));
+    assert.equal(purges.length, 2, "the cap is respected instead of the whole purge being refused");
+    assert.deepEqual(
+      purges.map((call) => call.body.trashIds),
+      [["t-a", "t-b"], ["t-c"]]
+    );
+    assert.ok(purges.every((call) => call.body.acknowledge === true), "every request carries the consent");
+
+    calls.length = 0;
+    storeInstance.actions.setPurge({
+      trashIds: ["*"],
+      count: 3,
+      bytes: 3,
+      acknowledged: true,
+      pending: false,
+      error: null
+    });
+    await confirmPurge();
+    const sentinel = calls.filter((call) => call.url.endsWith("/purge"));
+    assert.equal(sentinel.length, 1, "the sentinel is one request");
+    assert.deepEqual(sentinel[0].body.trashIds, ["*"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    storeInstance.actions.setPurge(null);
+    storeInstance.actions.setNotice(null);
+    storeInstance.actions.patchBin({ maxBatch: 100 });
   }
 });

@@ -421,7 +421,7 @@ detach 会把 id 从它所属的 workspace 里摘掉，于是「列表里还有�
 | 方法 | 路径 | 请求体 | 返回 |
 |---|---|---|---|
 | GET | `/session-trash` \| `/status` | — | `{ok, value:{root,count,bytes,retentionDays,canDelete,…}}` |
-| GET | `/session-trash/list` | — | `{ok, value:{items,broken,stats}}` |
+| GET | `/session-trash/list` | — | `{ok, value:{items,broken,stats,maxBatch}}` |
 | GET | `/session-trash/log?limit=N` | — | `{ok, value:{records}}` |
 | POST | `/session-trash/plan` | `{sessionIds, sizes?}` | `{ok, value:{plans, root, maxBatch, retentionDays, canDelete}}`（**只读预检**） |
 | POST | `/session-trash/delete` | `{sessionIds,titles?,stopActivity?,waitForReleaseMs?}` | `{ok, value:{results,deleted,failed}}` |
@@ -447,10 +447,12 @@ detach 会把 id 从它所属的 workspace 里摘掉，于是「列表里还有�
   而不是可解释的拒绝）。
 - 所有接受 id 列表的动作都在请求层统一校验；`purge` 的 `["*"]` 哨兵豁免（它命名的是回收站自己的内容）。
 - **`plan` 的上限与变更动作不同**：预检只读、代价是每会话一次 `lstat`，所以它单独放宽到 `planMaxIds`
-  （`max(配置 maxBatch, 500)`）。变更动作（`delete`/`restore`）仍受 `maxBatch` 约束——但那个约束现在由
+  （`max(配置 maxBatch, 500)`）。变更动作（`delete`/`restore`/`purge`）仍受 `maxBatch` 约束——但那个约束现在由
   客户端**切成多批**来满足，而不是让用户撞上 `batch-too-large` 的死胡同（见 7.5）。
 - `plan` 的返回体顺带带上 `root` 与 `maxBatch`：对话框描述需要的回收站路径、以及客户端切批要用的批大小，
   一次往返就够。旧版宿主半不返回这两项时，客户端退化为单独一次 `GET /status`（两半是分开热更新的）。
+- `list` 的返回体同样带上 `maxBatch`：回收站面板没有预检，它要恢复/彻底删除的是**回收站里的条目**，
+  批大小只能从这里拿；旧版宿主半不返回时客户端退回默认值（100，与宿主默认一致）。
 - `waitForReleaseMs` 在服务层被夹到 `[0, 15000]`：这个等待发生在**共享的变更队列内部**，
   不设上限的话一个请求就能把所有人的删除/恢复/彻底删除全部堵住。
 - 未预期异常 → 500 并写入宿主日志；业务拒绝 → 200 内的 `results[].code`（批次语义），
@@ -552,9 +554,9 @@ const storeSeat = { ...storeHandle, create: () => storeInstance };
 上限。旧实现把 100 个 id 直接发过去，超过了就整次预检 400，对话框空着、只有一行错误——一个用户
 根本不知道怎么处理的死胡同。现在客户端负责把「用户选了多少」翻译成「宿主能接受多少」。
 
-**回收站恢复**：面板选中条目 → 「恢复选中」→ `POST /restore` → 刷新面板与会话列表 → Toast 报告恢复数量。原始路径被占用时该项返回 `occupied`，其余照常，条目保留在回收站。
+**回收站恢复**：面板选中条目 → 「恢复选中」→ `POST /restore` → 刷新面板与会话列表 → Toast 报告恢复数量。原始路径被占用时该项返回 `occupied`，其余照常，条目保留在回收站。选中条目多于一次请求能带的数量时，按 `maxBatch` **切成多批**提交（与删除路径同一套切批逻辑），而不是整次被 `batch-too-large` 拒绝。
 
-**彻底删除**：面板 → 「彻底删除」/「清空回收站」→ 弹窗需勾选「我了解此操作无法恢复」→ `POST /purge`（带 `acknowledge: true`）→ 释放字节数写入 Toast。UI 未勾选时**根本不发请求**，宿主端即使收到请求也会以 428 拒绝。
+**彻底删除**：面板 → 「彻底删除」/「清空回收站」→ 弹窗需勾选「我了解此操作无法恢复」→ `POST /purge`（带 `acknowledge: true`）→ 释放字节数写入 Toast。UI 未勾选时**根本不发请求**，宿主端即使收到请求也会以 428 拒绝。同样按 `maxBatch` 切批；`["*"]` 哨兵是一个整体，永远只发一次请求。
 
 ### 7.6 样式
 
@@ -630,6 +632,59 @@ CSS 全部使用 DSH 自己的设计令牌（`--dsw-alias-label-primary`、`--ds
 
 > **为什么 SSR 测试抓不到它**：服务端渲染只执行渲染路径，点击处理器一次都不会被调用。类缺陷只能靠
 > 「调用它」的测试来发现——这也是 TEST-PLAN §5.10 新增那层测试的唯一目的。
+
+### 9.1 第二轮复核：与 DSH 上游契约对齐
+
+前一轮复核的对象是本插件自身。这一轮的起点是**插件对 DSH 的假设**，逐条回到上游源码核对
+（`packages/client/ui-workspace/src/client/tree.ts`、`packages/client/runtime/src/client/sessions/service.ts`、
+`packages/session/session-persistence-jsonl/src/format.ts`），结论如下。前五条都已修复并有回归测试。
+
+| # | 严重度 | 缺陷 | 修复 |
+|---|---|---|---|
+| 24 | 中 | 批量删除的候选集用 `parentId` 判断「子代理」，而 DSH 的子代理位是 `origin === 'subagent'`（上游 `sessionVisible` 的规则）。**普通分叉（fork）也带 `parentId`**，于是侧栏里照常可见的分叉会话在批量选择器里**静默消失**，用户无法批量删除它 | 改判 `origin`：只排除子代理，与 DSH 自己的可见性规则逐字一致。回归测试 `batch candidates exclude blanks and subagent children` 同时固定「子代理被排除、普通分叉被保留」 |
+| 25 | 中 | 回收站面板的「恢复选中」「彻底删除」把**整份选择**放进一个请求，而宿主按 `maxBatch`（默认 100）拒绝超限请求 → 回收站里超过 100 项时，这两个按钮**完全不可用**（删除路径早已切批，恢复/彻底删除没有） | 恢复与彻底删除按 `maxBatch` **切批**，与删除路径同一套逻辑；`list` 的返回体带上 `maxBatch`（面板没有预检，批大小只能从这里拿）。回归测试：切批请求数与每批 id、`["*"]` 哨兵仍只发一次 |
+| 26 | 中 | manifest 能解析、但 `state` 是本版本不认识的（例如另一个版本写的）时，该条目**既不可恢复、也不算损坏**：面板看不见它，「清空回收站」的展开也跳过它 → 字节永久泄漏，且用户无从得知 | `list()` 把未知状态报为 `unknown-state`（并入 `BROKEN_STATES`，含字节数）→ 可见、可彻底删除。回归测试 R25 |
+| 27 | 低 | 审计日志的 `host` 列取 `process.env.HOSTNAME`；`HOSTNAME` 是 shell 的约定，GUI 启动的 DSH 进程**通常没有它** → 每条记录都记成空串的哈希（`e3b0c44298fc`），所有机器同一个值，审计轨迹分不出是谁干的 | 退回 `os.hostname()`（`HOSTNAME` 仍在时优先用它），哈希方式不变（仍是 12 位十六进制、不落明文）。回归测试 R26 |
+| 28 | 低 | 删除结果里的 `timings.wait` 记的是**允许等待的预算**而不是实际等待时长：会话秒释放也被报成「等了 8 秒」，而且等待的时间被算进了 `move` 阶段 → 客户端的「本次删除很慢」提示每次都误报 | 改为 `phase("wait")` 计时（预算只决定等多久，不决定报告什么）。回归测试 R27 |
+
+### 9.2 第三轮复核：按**部署版本**（`dsh-v0.2.0-rc.2`）逐条核对契约
+
+第二轮把插件对 DSH 的假设拿回上游源码核对时，用的是本地检出的 `dsh-v0.1.0-rc.7`——**版本比插件部署的版本旧**。
+这一轮改用插件真正面对的 `dsh-v0.2.0-rc.2` tag 重新核对（`git show dsh-v0.2.0-rc.2:<path>`），结论如下。
+
+**先说核对无误的**（这些是插件能工作的前提，逐条确认）：
+
+| 契约 | 上游（`dsh-v0.2.0-rc.2`） | 插件的用法 | 结论 |
+|---|---|---|---|
+| 客户端会话行 | `SessionSummary { id, displayTitle, cwd?, parentId?, origin?: 'subagent', running, blank }`，`SessionListState { ids, byId }` | `batchCandidates` 读 `id`/`displayTitle`/`blank`/`running`/`cwd` | 一致（`origin` 判定已按上游修正，见 §9.1 第 24 条） |
+| 子代理判定 | `sessionVisible`：`session.origin === 'subagent'` 才隐藏；`parentId` 只用于分叉的**排序** | 原先按 `parentId` 过滤 → 会误删分叉候选 | 已修（§9.1 第 24 条） |
+| 会话目录布局 | `<root>/<projectKey(cwd)>/<encodeSegment(id)>`；`encodeSegment`/`projectKey` 与 `encode.js` 逐字节相同 | 定位器第 2/3 层 | 一致 |
+| 定位层 1 | JSONL 后端有 `locate(meta)` → `{kind:'jsonl', path}`（TS `private`，运行时可见） | `persistence.locate(header)` | 运行时成立（见第 29 条的脆弱性说明） |
+| `sessionPersistence` 契约 | 抽象类只有 `create/open/flush/stat/list`；**没有 `root`/`locate`** | `persistence?.root` / `persistence?.locate` 都是**可选优先** | 契约外成员，但插件有纯计算回退层，缺失也不失效 |
+| `workspaceRegistry` | `archivedSessionIds`/`pinnedSessionIds` 是数组；`archiveSession(id,{stopActivity})`、`unarchiveSession`、`pinSession`、`unpinSession`、`list()` 均存在；实体有 `path`/`sessionIds`/`attachSession` | 记账清理与恢复记账 | 一致 |
+| 活动探针 | `workspace/session-activity`（载荷 `{sessionId}`，返回 `SessionActivity[]`），提供者：agent / jobs / schedule / subagent | `ctx.waterfall(...)` | 一致 |
+| 停止工作 | `workspace/session-stop`（载荷 `{sessionId}`）；agent 的处理器只在 `status === 'running'` 时取消 → 幂等 | 原先只走 `registry.stopSessionActivity`（TS private） | 已修（§9.1 第 29 条） |
+| 事件 | `api-session/added`（带 summary）、`api-session/removed`（带 sessionId）均存在 | `#emitAdded` / `#emitRemoved` | 一致 |
+| 客户端服务 | `sessions.refresh()`、`sessions.list.getSnapshot()`、`uiWorkspace.mainReference.sessionId` / `openSession` / `clearMain`、`layout.selectPanel` 均存在 | 对应调用 | 一致 |
+| 路由注册 | `webServer.register({kind:'prefix', path, handler})` | 唯一一条前缀路由 | 一致 |
+
+**本轮修掉的三条**：
+
+| # | 严重度 | 缺陷 | 修复 |
+|---|---|---|---|
+| 29 | **中（安全相关）** | 停止工作的路径依赖 `workspaceRegistry.stopSessionActivity`——它是注册表的 **TS `private`** 成员（上游自己内部就是 `ctx.parallel('workspace/session-stop')` 的一层包装）。私有成员可以被改名或改成真正的 `#private` 而无需通知；届时插件的 `typeof === "function"` 守卫会**静默跳过停止** → 用户明明点了「强制删除（会先停止工作）」，会话却带着仍在运行的工作被搬走 | 公开契约 `ctx.parallel("workspace/session-stop", { sessionId })` 作为**回退**：注册表接缝在时行为完全不变，接缝消失时走公开瀑布流。回归测试 R28（注册表没有该接缝时，公开瀑布流仍被派发） |
+| 30 | 低 | 审计日志只追加、从不轮转，而 `limit` 原样透传 → 一个请求就能把**全部历史**读进内存；`limit=0` 还会返回 1 条记录 | 路由层夹到 `[0, 10000]`，存储层按夹取后的值精确截断（`limit=0` 返回空）。回归测试 R29 + 路由用例 |
+| 31 | 低 | 抑制重复告警的 `warnedResidency` 集合与宿主进程同寿且**从不清理** → 随进程探过的每个会话增长 | 上限 256 条，满了淘汰最旧的一条（Set 保序）。回归测试 R30 |
+
+> **仍然成立但值得记录的脆弱性**：`sessionPersistence.root` 与 `locate()`、`workspaceRegistry.stopSessionActivity()`
+> 都是上游的**非契约成员**（TS `private` 或抽象类之外）。它们在 `dsh-v0.2.0-rc.2` 上运行时都存在，插件对缺失也有回退
+> （第 29 条已把停止路径的回退补齐；定位器的回退层是纯计算的第 2/3 层）。但如果上游把它们改成真正的 `#private`，
+> 插件会退回到**计算式定位**（第 2/3 层）而不是失效——这是设计上的取舍，README 的数据安全一节已说明。
+
+同时**确认无误**的部分：`encode.js` 的 `encodeSegment` / `projectKey` 与上游
+`session-persistence-jsonl/src/format.ts` 逐字节一致；`workspaceRegistry` / `sessions` / `sessionPersistence`
+三个服务名与上游 `super(ctx, '<name>')` 一致；`archivedSessionIds` 是数组（`.includes` 可用），
+`list()` 返回的实体带 `path` 与 `sessionIds`（`attachSession` 的用法成立）。
 
 ### 5.10 客户端三层测试各自负责什么
 

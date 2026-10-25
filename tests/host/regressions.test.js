@@ -699,3 +699,170 @@ test("T3: an unavailable activity probe is fail-closed, never idle", async (t) =
   assert.equal(refused.results[0].code, "session-active");
   assert.match(refused.results[0].message, /无法确认/);
 });
+
+test("R25: an item whose manifest names an unknown state is visible and purgeable", async (t) => {
+  // The defect: a manifest that parses but carries a state this build does not
+  // know was neither restorable nor broken, so the panel could not show it and
+  // the `["*"]` sentinel skipped it — its bytes leaked forever with nothing to
+  // act on.
+  const { store } = await fixture(t);
+  const trashId = "t-20260101T000000Z-cafebabe";
+  const dir = store.itemDir(trashId);
+  await fs.mkdir(path.join(dir, "payload"), { recursive: true });
+  await fs.writeFile(path.join(dir, "payload", "leftover"), "leaked bytes");
+  await fs.writeFile(
+    path.join(dir, "manifest.json"),
+    JSON.stringify({ trashId, sessionId: SESSION_A, state: "v2-trashed" })
+  );
+
+  const items = await store.list();
+  assert.equal(items.length, 1);
+  assert.equal(items[0].state, "unknown-state", "an unreadable state is reported, not dropped");
+  assert.ok(items[0].totalBytes > 0, "its bytes are reported");
+
+  const service = new SessionTrashService(fakeCtx({}), { store });
+  const listing = await service.list();
+  assert.equal(listing.items.length, 0, "an unreadable state is not offered as restorable");
+  assert.equal(listing.broken.length, 1, "but it is reported as broken");
+  assert.equal(listing.stats.brokenCount, 1, "the broken count agrees with the broken list");
+
+  const purged = await service.purgeSessions({ trashIds: ["*"], acknowledge: true });
+  assert.equal(purged.purged, 1, JSON.stringify(purged.results));
+  await assert.rejects(() => fs.lstat(dir), /ENOENT/);
+});
+
+test("R26: the audit log tells the hosts apart without HOSTNAME in the environment", async (t) => {
+  // The defect: `HOSTNAME` is a shell convention, and a GUI-launched DSH has
+  // none, so every audit record carried the hash of the empty string and the
+  // trail could not say which machine did what.
+  const root = await tempDir(t);
+  const store = new TrashStore({ root: path.join(root, "bin") });
+  await store.init();
+  const saved = process.env.HOSTNAME;
+  try {
+    delete process.env.HOSTNAME;
+    await store.record({ op: "probe", outcome: "ok" });
+    const withoutEnv = (await store.readLog({ limit: 1 }))[0].host;
+    assert.notEqual(withoutEnv, "e3b0c44298fc", "the hash of the empty string identifies nothing");
+
+    process.env.HOSTNAME = "another-host";
+    await store.record({ op: "probe", outcome: "ok" });
+    const withEnv = (await store.readLog({ limit: 1 }))[0].host;
+    assert.notEqual(withEnv, withoutEnv, "two hosts are told apart");
+  } finally {
+    if (saved === undefined) delete process.env.HOSTNAME;
+    else process.env.HOSTNAME = saved;
+  }
+});
+
+test("R27: the reported wait is the wait that happened, not the budget", async (t) => {
+  // The defect: the wait phase was recorded as the budget it was allowed to
+  // spend, so a session that let go at once was reported as an eight-second
+  // wait — and the move phase carried that wait's time on top of its own.
+  const { service } = await releaseFixture(t);
+  const outcome = await service.deleteSessions({
+    sessionIds: [SESSION_A],
+    stopActivity: true,
+    waitForReleaseMs: 8000
+  });
+  assert.equal(outcome.deleted, 1, JSON.stringify(outcome.results));
+  const timings = outcome.results[0].timings;
+  assert.ok((timings.wait ?? 0) < 1000, `the wait is reported as ${String(timings.wait)}ms, not as the 8000ms budget`);
+  assert.ok((timings.move ?? 0) < 1000, `the move phase excludes the wait (${String(timings.move)}ms)`);
+});
+
+test("R28: the work is stopped through the public waterfall when the registry seam is gone", async (t) => {
+  // The defect: stopping the work leaned on `workspaceRegistry.stopSessionActivity`,
+  // which is a *private* member of the registry. A private member can be renamed
+  // or made truly private without notice, and the `typeof` guard would then skip
+  // the stop silently — the session would be deleted with its work still running,
+  // even though the user consented to "stop and delete". The public contract is
+  // the `workspace/session-stop` waterfall, which DSH's own archive flow uses.
+  const root = await tempDir(t);
+  const sessionRoot = path.join(root, "sessions");
+  const cwd = "/tmp/project";
+  const sessionDir = await seedSession({ root: sessionRoot, cwd, sessionId: SESSION_A, contents: "work\n" });
+  const stopped = [];
+  const ctx = fakeCtx(
+    {
+      sessionPersistence: fakePersistence({ root: sessionRoot, sessionCwd: new Map([[SESSION_A, cwd]]) }),
+      // A registry without the private stop seam — the shape a future DSH could
+      // have without the plugin noticing.
+      workspaceRegistry: {
+        archivedSessionIds: [],
+        pinnedSessionIds: [],
+        list: () => [],
+        async archiveSession() {},
+        async unarchiveSession() {},
+        async unpinSession() {},
+        async pinSession() {}
+      },
+      sessions: fakeSessions([SESSION_A])
+    },
+    { waterfall: () => [{ kind: "turn" }] }
+  );
+  // The fake context records every `ctx.parallel` dispatch.
+  const originalParallel = ctx.parallel;
+  ctx.parallel = async (event, payload) => {
+    stopped.push({ event, sessionId: payload?.sessionId });
+    return originalParallel(event, payload);
+  };
+
+  const store = new TrashStore({ root: path.join(root, "bin"), logger: recordingLogger() });
+  const service = new SessionTrashService(ctx, { store });
+  const outcome = await service.deleteSessions({
+    sessionIds: [SESSION_A],
+    stopActivity: true,
+    force: true,
+    waitForReleaseMs: 80
+  });
+  assert.equal(outcome.deleted, 1, JSON.stringify(outcome.results));
+  assert.ok(
+    stopped.some((call) => call.event === "workspace/session-stop" && call.sessionId === SESSION_A),
+    `the public stop waterfall was dispatched: ${JSON.stringify(stopped)}`
+  );
+  await assert.rejects(() => fs.lstat(sessionDir), /ENOENT/, "the session directory really moved into the bin");
+});
+
+test("R29: the audit log read is bounded and honours the limit exactly", async (t) => {
+  // The defect: the audit log is append-only and never rotated, and the limit
+  // was passed through unclamped — one request could pull the whole history
+  // into memory. A limit of zero also returned one record instead of none.
+  const root = await tempDir(t);
+  const store = new TrashStore({ root: path.join(root, "bin") });
+  await store.init();
+  for (let index = 0; index < 5; index += 1) await store.record({ op: `probe${String(index)}`, outcome: "ok" });
+
+  assert.equal((await store.readLog({ limit: 0 })).length, 0, "a limit of zero reads nothing");
+  assert.equal((await store.readLog({ limit: 2 })).length, 2, "the limit is honoured exactly");
+  assert.equal((await store.readLog({ limit: 99 })).length, 5, "a limit above the record count reads them all");
+  assert.equal((await store.readLog({ limit: -3 })).length, 0, "a negative limit reads nothing");
+});
+
+test("R30: the residency warning set cannot grow without bound", async (t) => {
+  // The defect: the set that suppresses a repeated warning lived in a module
+  // as long as the host and was never pruned, so it grew with every session
+  // the process ever probed. The bound is observable: the set forgets its
+  // oldest ids, so an early session warns again once it has been evicted.
+  const { isResident } = await import("../../lib/host/locate.js");
+  const ctx = fakeCtx({});
+  const logger = recordingLogger();
+  ctx.logger = logger;
+  const warnings = () => logger.lines.filter((line) => line.startsWith("warn:")).length;
+
+  // The same session warns once, not once per probe.
+  assert.equal(isResident(ctx, "session-a"), true);
+  const afterFirst = warnings();
+  assert.equal(isResident(ctx, "session-a"), true);
+  assert.equal(warnings(), afterFirst, "a session already warned about is not warned about again");
+
+  // Probe far more sessions than the set is allowed to remember.
+  for (let index = 0; index < 400; index += 1) isResident(ctx, `session-${String(index)}`);
+  const before = warnings();
+  isResident(ctx, "session-0");
+  assert.equal(warnings(), before + 1, "the oldest id was forgotten, so the set stayed bounded");
+  // And the most recent one is still remembered.
+  const after = warnings();
+  isResident(ctx, "session-399");
+  assert.equal(warnings(), after, "a probe just warned is not warned about again");
+});

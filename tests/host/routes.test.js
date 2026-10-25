@@ -160,6 +160,9 @@ test("GET /session-trash and GET /session-trash/list answer the read model", asy
   assert.equal(list.status, 200);
   assert.deepEqual(list.body.value.items, []);
   assert.deepEqual(list.body.value.broken, []);
+  // The bin's cap travels with the listing: the panel restores and purges a
+  // selection in as many requests as the cap needs, so it has to know the cap.
+  assert.equal(list.body.value.maxBatch, 2);
 });
 
 test("POST /session-trash/plan is read-only and never touches the trash root", async (t) => {
@@ -438,6 +441,25 @@ test("the audit log endpoint returns the recorded operations", async (t) => {
   assert.ok(ops.includes("trash:ok"));
   // A fileless id is cleared rather than refused, and the log says which it was.
   assert.ok(ops.includes("delete:cleared"));
+});
+
+test("the audit log read is bounded and its limit is honoured", async (t) => {
+  // The defect: the log is append-only and never rotated, and the limit was
+  // passed through unclamped — one request could pull the whole history into
+  // memory. A limit of zero also returned one record instead of none.
+  const { post, call } = await serve(t);
+  await post("/session-trash/delete", { sessionIds: [SESSION_A] });
+  const zero = await call("/session-trash/log?limit=0");
+  assert.equal(zero.status, 200);
+  assert.deepEqual(zero.body.value.records, [], "a limit of zero reads nothing");
+  const negative = await call("/session-trash/log?limit=-5");
+  assert.equal(negative.status, 200);
+  assert.deepEqual(negative.body.value.records, [], "a negative limit reads nothing");
+  const unbounded = await call("/session-trash/log?limit=99999999999");
+  assert.equal(unbounded.status, 200);
+  assert.ok(Array.isArray(unbounded.body.value.records), "an absurd limit is clamped, not refused");
+  const small = await call("/session-trash/log?limit=1");
+  assert.equal(small.body.value.records.length, 1, "the limit is honoured exactly");
 });
 
 test("a disabled plugin refuses every request without touching the bin", async (t) => {

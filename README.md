@@ -277,6 +277,7 @@ rm -rf ~/.dsh/session-trash
 | 会话目录是符号链接 | 拒绝（避免把链接指向的别处目录搬走） |
 | 解析出的路径落在会话仓库之外（含符号链接指向外部） | 拒绝，返回 `unsafe-location` |
 | 回收站条目没有 manifest（中断的删除） | 可彻底删除，但不可恢复（返回 `no-manifest`）；会作为「损坏项目」计数显示 |
+| 回收站条目的 manifest 状态本版本不认识 | 同样作为「损坏项目」显示并可彻底删除——它的字节不会永远泄漏 |
 | 会话 id / 回收站 id 不符合严格格式 | 拒绝 |
 | 恢复时原路径已被占用 | 拒绝，回收站条目保留 |
 | 彻底删除未显式确认 | 拒绝 |
@@ -305,6 +306,8 @@ rm -rf ~/.dsh/session-trash
 ### 审计
 
 所有变更与拒绝都写入 NDJSON 日志。主机名只记录 SHA-256 前 12 位，避免日志本身泄漏机器标识。回收站目录权限 `0700`，manifest 与日志 `0600`。本插件不采集、不外发任何遥测。
+
+日志只追加、从不轮转；`GET /session-trash/log?limit=N` 的 `N` 被夹在 `0–10000`，避免一次请求把整份历史读进内存（面板本身只取 50 条）。
 
 ### 明确不做的事
 
@@ -394,7 +397,7 @@ dsh-session-trash/
 │   │   ├── locate.js       # 三层会话目录定位 + realpath 包含性校验
 │   │   ├── trash-store.js  # 回收站：原子移动、manifest、自愈、审计日志
 │   │   ├── service.js      # 安全守卫、记账清理、批次语义
-│   │   ├── access.js       # loopback / 配对设备访问控制
+│   │   ├── access.js       # loopback / 受信任主机访问控制
 │   │   └── routes.js       # /session-trash HTTP 接口
 │   └── client.js           # 浏览器端：菜单项、两步确认、批量、回收站面板、样式
 ├── tests/
