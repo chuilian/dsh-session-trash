@@ -439,6 +439,37 @@ test("pure helpers: batch candidates exclude blanks and subagent children", asyn
   assert.deepEqual(batchCandidates(undefined), []);
 });
 
+test("pure helpers: the batch picker drops rows the user can no longer act on", async () => {
+  const { exports } = await loadBundle();
+  const { batchVisiblePlans, isGone } = exports.__test;
+  const plans = [
+    { sessionId: "keep", deletable: true, exists: true, archived: false, activity: [] },
+    // Archived: the sidebar hides it under the default filter, so a bulk
+    // selection must not sweep it in behind the user's back.
+    { sessionId: "archived", deletable: true, exists: true, archived: true, activity: [] },
+    // Already deleted: its files are in the recycle bin and only a residue row
+    // is left. Offering it promised a deletion that already happened.
+    { sessionId: "gone", deletable: false, exists: false, code: "not-found", archived: false, activity: [] },
+    // Same story, told the other way round.
+    { sessionId: "gone-by-code", deletable: false, code: "not-found", archived: false, activity: [] },
+    // A row that is merely blocked still stays: it has files, and the host
+    // explains why it cannot be moved.
+    { sessionId: "blocked", deletable: false, exists: true, archived: false, code: "not-visible", activity: [] }
+  ];
+  assert.deepEqual(
+    batchVisiblePlans(plans).map((plan) => plan.sessionId),
+    ["keep", "blocked"],
+    "only rows the user can still act on belong in a bulk-delete picker"
+  );
+  // The gone test is the one that regressed in the field: a deleted session
+  // kept showing up in the batch list with a 「已删除」 tag next to a checkbox.
+  assert.equal(isGone(plans[2]), true);
+  assert.equal(isGone(plans[3]), true);
+  assert.equal(isGone(plans[0]), false);
+  assert.deepEqual(batchVisiblePlans(undefined), []);
+  assert.deepEqual(batchVisiblePlans([]), []);
+});
+
 test("the delete flow publishes plans and deletes in one action", async () => {
   const { exports } = await loadBundle();
   const { storeInstance, openDeleteDialog, confirmDelete, setContext } = exports.__test;
@@ -509,6 +540,125 @@ test("the delete flow publishes plans and deletes in one action", async () => {
     assert.equal(payload.stopActivity, true, "the resident row forces the stop-then-delete path");
     assert.equal(payload.force, true, "consenting to the stop also consents to the delete not being refused");
     assert.ok(payload.waitForReleaseMs > 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("the batch dialog never lists a session that is already deleted or archived", async () => {
+  const { exports } = await loadBundle();
+  const { storeInstance, openDeleteDialog, setContext } = exports.__test;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const body = options.body === undefined ? {} : JSON.parse(options.body);
+    const respond = (value) => ({ status: 200, json: async () => ({ ok: true, value }) });
+    if (String(url).endsWith("/plan")) {
+      // The host is the only side that can tell a residue row from a session
+      // that was merely hidden, so the answer it gives is what the picker obeys.
+      return respond({
+        plans: (body.sessionIds ?? []).map((sessionId) => {
+          if (sessionId === "gone") {
+            return { sessionId, deletable: false, exists: false, code: "not-found", archived: false, activity: [] };
+          }
+          if (sessionId === "archived") {
+            return { sessionId, deletable: true, exists: true, archived: true, activity: [] };
+          }
+          return { sessionId, deletable: true, exists: true, archived: false, activity: [] };
+        }),
+        root: "/tmp/bin",
+        maxBatch: 100,
+        quickDelete: false
+      });
+    }
+    if (String(url).endsWith("/status")) return respond({ root: "/tmp/bin" });
+    return respond({});
+  };
+  try {
+    const ctx = {
+      get: (name) =>
+        name === "sessions"
+          ? {
+              list: {
+                getSnapshot: () => ({
+                  ids: ["keep", "gone", "archived"],
+                  byId: {
+                    keep: { id: "keep", displayTitle: "Keep", blank: false },
+                    gone: { id: "gone", displayTitle: "Gone", blank: false },
+                    archived: { id: "archived", displayTitle: "Archived", blank: false }
+                  }
+                })
+              },
+              refreshList: async () => {}
+            }
+          : undefined
+    };
+    setContext(ctx);
+    await openDeleteDialog({ mode: "batch" }, ctx);
+    const dialog = storeInstance.getSnapshot().dialog;
+    assert.deepEqual(
+      dialog.plans.map((plan) => plan.sessionId),
+      ["keep"],
+      "the batch list must not offer a deleted session or an archived one"
+    );
+    assert.deepEqual(
+      dialog.sessionIds,
+      ["keep"],
+      "the dialog's id list must follow the rows it shows, or a stale id would travel into the delete payload"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("the single-session dialog still shows a residue row it was asked about", async () => {
+  const { exports } = await loadBundle();
+  const { storeInstance, openDeleteDialog, setContext } = exports.__test;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const body = options.body === undefined ? {} : JSON.parse(options.body);
+    const respond = (value) => ({ status: 200, json: async () => ({ ok: true, value }) });
+    if (String(url).endsWith("/plan")) {
+      return respond({
+        plans: (body.sessionIds ?? []).map((sessionId) => ({
+          sessionId,
+          deletable: false,
+          exists: false,
+          code: "not-found",
+          archived: false,
+          activity: []
+        })),
+        root: "/tmp/bin",
+        maxBatch: 100,
+        quickDelete: false
+      });
+    }
+    if (String(url).endsWith("/status")) return respond({ root: "/tmp/bin" });
+    return respond({});
+  };
+  try {
+    const ctx = {
+      get: (name) =>
+        name === "sessions"
+          ? {
+              list: {
+                getSnapshot: () => ({
+                  ids: ["gone"],
+                  byId: { gone: { id: "gone", displayTitle: "Gone", blank: false } }
+                })
+              },
+              refreshList: async () => {}
+            }
+          : undefined
+    };
+    setContext(ctx);
+    await openDeleteDialog({ mode: "single", sessionId: "gone", displayTitle: "Gone" }, ctx);
+    const dialog = storeInstance.getSnapshot().dialog;
+    assert.equal(
+      dialog.plans.length,
+      1,
+      "asking about one session by name keeps that row — the batch filter must not swallow it"
+    );
+    assert.equal(dialog.plans[0].sessionId, "gone");
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -540,6 +540,8 @@ const storeSeat = { ...storeHandle, create: () => storeInstance };
 ```
 菜单「批量删除会话…」
   → POST /plan（按 DEFAULT_MAX_BATCH=100 切批，逐批预检）
+  → **按预检结果收敛列表**：剔除宿主判定为「已归档」与「已删除」的行
+     （客户端看不到归档集合，只有宿主能区分「残留行」与「只是被隐藏的会话」）
   → 一次渲染全部行：每行都可勾选（标签只描述状态，不代替用户决定）
   → 「全选」= 当前筛选结果；已选计数实时更新
   → 「删除」/「强制删除」= 一次点击
@@ -646,6 +648,7 @@ CSS 全部使用 DSH 自己的设计令牌（`--dsw-alias-label-primary`、`--ds
 | 26 | 中 | manifest 能解析、但 `state` 是本版本不认识的（例如另一个版本写的）时，该条目**既不可恢复、也不算损坏**：面板看不见它，「清空回收站」的展开也跳过它 → 字节永久泄漏，且用户无从得知 | `list()` 把未知状态报为 `unknown-state`（并入 `BROKEN_STATES`，含字节数）→ 可见、可彻底删除。回归测试 R25 |
 | 27 | 低 | 审计日志的 `host` 列取 `process.env.HOSTNAME`；`HOSTNAME` 是 shell 的约定，GUI 启动的 DSH 进程**通常没有它** → 每条记录都记成空串的哈希（`e3b0c44298fc`），所有机器同一个值，审计轨迹分不出是谁干的 | 退回 `os.hostname()`（`HOSTNAME` 仍在时优先用它），哈希方式不变（仍是 12 位十六进制、不落明文）。回归测试 R26 |
 | 28 | 低 | 删除结果里的 `timings.wait` 记的是**允许等待的预算**而不是实际等待时长：会话秒释放也被报成「等了 8 秒」，而且等待的时间被算进了 `move` 阶段 → 客户端的「本次删除很慢」提示每次都误报 | 改为 `phase("wait")` 计时（预算只决定等多久，不决定报告什么）。回归测试 R27 |
+| 32 | **高（用户实测报告）** | **已删除的会话仍出现在「批量删除会话…」的列表里**，旁边挂着「已删除」徽标和一个复选框。取证：回收站 `items/` 里已有 `t-20261025T111935Z-9775eb01`（`插件调研与安装`）与 `t-20261025T112004Z-d8447a6a`（`了解 hyperframes 项目用途`），两个会话目录早已移走，但 `batchCandidates` 只排除空白与子代理，**既不套用侧栏的归档过滤、也不看行是否还有文件** → 批量列表等于承诺一次早已发生过的删除，「全选」还会把用户从未在侧栏见过的行一并扫进去 | 批量列表只保留用户**还能删**的行：以**宿主预检**为准剔除 `archived`（用户已归档、侧栏默认隐藏）与「已删除」（`exists:false` / `code:'not-found'`，只剩残留行）。判定交给宿主，因为客户端看不到归档集合，只有宿主能区分「残留行」与「只是被隐藏的会话」。**单会话对话框不受影响**：用户点名问的那一行仍要显示（「已删除」徽标在那里说的是实话）。回归测试：`the batch picker drops rows the user can no longer act on`、`the batch dialog never lists a session that is already deleted or archived`、`the single-session dialog still shows a residue row it was asked about` |
 
 ### 9.2 第三轮复核：按**部署版本**（`dsh-v0.2.0-rc.2`）逐条核对契约
 

@@ -16,7 +16,7 @@
 | 单元（真实文件系统） | `TrashStore` 全生命周期、崩溃窗口、包含性、符号链接 | 18 | 回收站的正确性**就是**文件系统的正确性，必须用真实文件而不是 mock |
 | 单元（服务守卫） | `SessionTrashService` 的同意门槛、释放/强制、记账清理、批次语义、审计 | 20 | 这是「允不允许删」的决策层，最重要 |
 | 集成（宿主链路） | 定位器三层 + 包含性校验 + 降级，与服务/回收站联合 | 16 | 单层都对但拼起来错，是这类插件的典型事故 |
-| 契约 + 纯逻辑（客户端产物） | 直接加载 `lib/client.js`，按浏览器的方式 | 22 | 验证「平台模块表」「空 inject」「服务门禁」这类会让整页挂掉的契约，以及删除前的视图释放 |
+| 契约 + 纯逻辑（客户端产物） | 直接加载 `lib/client.js`，按浏览器的方式 | 33 | 验证「平台模块表」「空 inject」「服务门禁」这类会让整页挂掉的契约，以及删除前的视图释放 |
 | HTTP 端到端 | 真实 `node:http` 服务器 + 真实请求，覆盖路由/方法/状态码/访问控制 | 20 | 路由层是客户端与宿主之间的全部契约 |
 | **回归（复核缺陷 + 用户实测）** | 每个缺陷一条，且必须能对旧实现失败 | 25 | 见 §2.7 |
 | **合计（必测）** | | **137** | |
@@ -162,7 +162,7 @@
 | 19 | 审计日志接口 | 含 `trash:ok` 与 `delete:refused` |
 | 20 | `enabled: false` | 每个动作 404 `disabled`，且什么都没搬 |
 
-### 2.6 `tests/client/bundle.test.js`（22）
+### 2.6 `tests/client/bundle.test.js`（33）
 
 | # | 用例 | 断言要点 |
 |---|---|---|
@@ -188,6 +188,9 @@
 | 19 | 渲染后的对话框只有一个破坏性动作 | 一致性按钮与强制删除变体的文案 |
 | 20 | **列表里无文件的会话显示为「已删除」** | `isGone` 的三种判据；`goneCount` 与 `blockedCount` 的区分；中英文文案 |
 | 21 | 强制删除的提示条说明残留去向 | 断言文案含「归档」与「重启」 |
+| 22 | **批量列表排除已删除/已归档的行** | `batchVisiblePlans` 保留普通行与「仅被阻塞」的行，剔除 `archived` 与 `gone`（两种判据）；`isGone` 三种判据；空输入 → `[]` |
+| 23 | **批量对话框不再列出已删除/已归档会话** | 宿主预检返回三者时，`plans` 与 `sessionIds` 只剩可删的那一个 |
+| 24 | **单会话对话框仍显示被点名的残留行** | 批量规则不得吞掉单会话入口 |
 
 ### 2.7 `tests/host/regressions.test.js`（17）
 
@@ -243,7 +246,8 @@
 |---|---|
 | AC-1 菜单项位置/样式一致 | 客户端 2 |
 | AC-2 两次确认，单击无法完成 | 客户端 8、12 |
-| AC-3 批量多选/搜索/全选 | 客户端 11、12 |
+| AC-3 批量多选/搜索/全选 | 客户端 11、12、23 |
+| AC-28 批量不列已删除/已归档会话，单会话仍显示残留行 | 客户端 22、23、24 |
 | AC-4 删除后消失并进回收站 | 服务 9、12；回收站 1 |
 | AC-5 恢复后原路径内容一致 | 回收站 6 |
 | AC-6 占用时拒绝且条目保留 | 回收站 7；服务 15 |
@@ -304,18 +308,18 @@ node --test --test-concurrency=1 --test-name-pattern="崩溃" "tests/host/*.test
 
 ```
 $ node --test --test-concurrency=1 "tests/host/*.test.js" "tests/client/*.test.js" "tests/integration/*.test.js"
-# tests 156
-# pass 152
+# tests 171
+# pass 167
 # fail 0
 # skipped 4          (真实 React 层；未安装 React 时跳过)
-# duration_ms ~3500
+# duration_ms ~4400
 
-$ NODE_PATH=/tmp/reactprobe/node_modules node --test --test-concurrency=1 "tests/host/*.test.js" "tests/client/*.test.js" "tests/integration/*.test.js"
-# tests 156
-# pass 156
+$ NODE_PATH=/tmp/react-check/node_modules node --test --test-concurrency=1 "tests/host/*.test.js" "tests/client/*.test.js" "tests/integration/*.test.js"
+# tests 171
+# pass 171
 # fail 0
 # skipped 0
-# duration_ms ~3500
+# duration_ms ~4400
 ```
 
 `/tmp/reactprobe` 是自备的 React 探针环境（`react` + `react-dom`，本包不依赖它们）；该次运行把 `tests/integration/render.test.js`
