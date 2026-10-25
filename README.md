@@ -46,18 +46,18 @@ profile 的软链直连 `~/.dsh/plugins/dsh-session-trash/`，不经过工作区
 
 ### 改位置 / 恢复
 
-不要手工建软链 —— 登记分散在四处，漏改任何一处都会在下次 `pnpm install` 时被顶掉。用 infra 仓库的
-`relink.sh` 统一改写，`verify.sh` 做 44 项只读复查：
+**登记分散在四处，漏改任何一处都会在下次 `pnpm install` 时被顶掉** —— 必须一次改全：
 
-```bash
-cd ~/.dsh/plugins/_tooling
-./tools/relink.sh --all --dry-run   # 先看要改什么（零写入）
-./tools/relink.sh --all             # 真改（自动备份到 ~/.dsh/backups/profile/）
-./tools/verify.sh                   # 期望 44 项全 ok
-```
+| 位置 | 现状 |
+| --- | --- |
+| `~/.dsh/profiles/<profile>/package.json` → `dependencies` | `"dsh-session-trash": "link:/absolute/path/to/dsh-session-trash"` |
+| `~/.dsh/profiles/<profile>/pnpm-lock.yaml` → `importers` 段 | `specifier: link:/absolute/path/to/dsh-session-trash` + `version: link:../../plugins/dsh-session-trash` |
+| `~/.dsh/profiles/<profile>/node_modules/dsh-session-trash` | 指向 `~/.dsh/plugins/dsh-session-trash` 的软链 |
+| `~/.dsh/profiles/<profile>/package.json` → `dsh.profile.bundles` | 包名 `dsh-session-trash`（纯包名，不含路径，通常不用改） |
 
-工作区换了位置就加 `--workspace <新路径>`；恢复别处丢失的 profile 加 `--profile <名字>`。
-换机恢复的完整步骤见 `_tooling/INSTALL.md`。
+2026-10-25 起原先统一改写这四处的登记工具（`relink.sh` / `verify.sh`）已移除，改为手工维护；
+改完按上表逐条核对。动手前先把 `package.json` 与 `pnpm-lock.yaml` 备份到
+`~/.dsh/backups/profile/`。
 
 ## 安装
 
@@ -67,17 +67,6 @@ cd ~/.dsh/plugins/_tooling
 - Node.js `>= 22.19`（DSH 自带运行时即满足）
 - **无需联网**：插件零运行时依赖，宿主端只用 Node 内置模块，浏览器端只用 DSH 平台自带的模块
 
-### 方式一：用 infra 仓库的 relink.sh（推荐，本机唯一可靠路径）
-
-```bash
-cd ~/.dsh/plugins/_tooling
-./tools/relink.sh --all --to workspace --dry-run   # 先看要改哪四处（零写入）
-./tools/relink.sh --all --to workspace             # 真改（自动备份到 ~/.dsh/backups/profile/）
-./tools/verify.sh                                  # 42 项复查
-```
-
-工作区换了位置就加 `--workspace <新路径>`；换 profile 加 `--profile <名字>`。
-
 > ⚠️ **不要用 `dsh plugin add`，也不要在装完之后跑 `pnpm install`。**
 > 本机的插件管理器命令会报 `ERR_PNPM_RESOLUTION_POLICY_VIOLATIONS_UNHANDLED`
 > （`minimumReleaseAge` 策略缺 `no handleResolutionPolicyViolations` 回调），失败发生在写盘之前、
@@ -85,7 +74,7 @@ cd ~/.dsh/plugins/_tooling
 > `node_modules`，把 `link:` 软链顶回 registry 版本 —— `dsh-genui` 真的因此被换回 0.12.0，
 > 并被塞进一棵 428MB 的依赖树。
 
-### 方式二：手工编辑 profile（只在你不想用工具时）
+### 方式一：手工编辑 profile
 
 编辑 `~/.dsh/profiles/<profile>/package.json`：
 
