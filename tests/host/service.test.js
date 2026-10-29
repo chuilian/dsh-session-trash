@@ -335,19 +335,47 @@ test("a delete of a missing session clears the row instead of refusing", async (
   );
 });
 
-test("a delete of a fileless resident session hides it and tells clients it left", async (t) => {
+test("a delete of a fileless resident session releases it and takes the row off the list", async (t) => {
   // The live case: DSH keeps listing a session whose files are gone, so clearing it
-  // must hide it as well as emit the removal, or the row comes straight back.
-  const { service, ctx, registry, store } = await fixture(t, { resident: [MISSING_SESSION] });
+  // must release it from the runtime as well as emit the removal, or the row comes
+  // straight back. This is the 「已归档且删不掉」 report: the delete worked, and
+  // what remained was a row the runtime refused to give up.
+  const { service, ctx, registry, store, sessions } = await fixture(t, { resident: [MISSING_SESSION] });
   const outcome = await service.deleteSessions({ sessionIds: [MISSING_SESSION], stopActivity: true });
   assert.equal(outcome.results[0].ok, true, JSON.stringify(outcome.results));
   assert.equal(outcome.results[0].cleaned, true);
-  assert.deepEqual(registry.archivedSessionIds, [MISSING_SESSION], "a live fileless row is hidden by archiving it");
+  assert.equal(outcome.results[0].released, true, "the runtime let the session go");
+  assert.equal(outcome.results[0].residue, false, "nothing is left behind for the user to chase");
+  assert.equal(sessions.live.has(MISSING_SESSION), false, "the session left the live registry");
+  assert.deepEqual(
+    registry.archivedSessionIds,
+    [],
+    "a released row is un-archived: the archive set is what kept the ghost visible"
+  );
   assert.ok(
     ctx.emitted.some((row) => row.event === "api-session/removed" && row.args[0] === MISSING_SESSION),
     "every client is told the row is gone"
   );
   assert.deepEqual(await store.list(), []);
+  const cleared = (await store.readLog()).find((row) => row.op === "delete" && row.outcome === "cleared");
+  assert.ok(cleared !== undefined, "the clear is audited");
+  assert.equal(cleared.released, true, "the record says the runtime let the row go");
+  assert.equal(cleared.residue, false, "nothing is left behind for the sidebar to draw");
+});
+
+test("a fileless row the runtime refuses to release stays archived and says so", async (t) => {
+  // The release can fail: a registry without a disposer, or a session the host
+  // still owns. Then the honest answer is "archived and hidden, gone after a
+  // restart" — not a silent success, and not a refusal either.
+  const { service, ctx, registry } = await fixture(t, { resident: [MISSING_SESSION] });
+  const sessions = ctx.get("sessions");
+  delete sessions.store; // a registry that exposes no disposer at all
+  const outcome = await service.deleteSessions({ sessionIds: [MISSING_SESSION], stopActivity: true });
+  assert.equal(outcome.results[0].ok, true, JSON.stringify(outcome.results));
+  assert.equal(outcome.results[0].released, false);
+  assert.equal(outcome.results[0].residue, true, "the outcome tells the UI a residue may remain");
+  assert.deepEqual(registry.archivedSessionIds, [MISSING_SESSION], "the row is hidden instead of faked away");
+  assert.match(String(outcome.results[0].note), /重启 DSH/, "the note says what makes it disappear");
 });
 
 test("a fileless session still needs consent before it is cleared", async (t) => {
@@ -401,4 +429,45 @@ test("plan keeps the request order while inspecting several at once", async (t) 
   assert.deepEqual(plans.map((plan) => plan.sessionId), ids);
   assert.equal(plans[0].deletable, true);
   assert.equal(plans[1].deletable, true);
+});
+
+test("a purge drops the dead ids the destroyed session left behind", async (t) => {
+  // A purge destroys the last copy of a session, so the ids that still point at
+  // it are dead weight: the archive entry names a row that can never be opened
+  // again and can never be deleted either (there is no session left to pick).
+  // The delete path deliberately keeps the workspace slot (a restore has to land
+  // back in its workspace); a purge is the user saying "gone for good".
+  const { service, store, registry, sessionRoot } = await fixture(t, {
+    archived: [SESSION_A],
+    workspaces: [{ path: "/tmp/project", sessionIds: [SESSION_A] }]
+  });
+  const { item } = await store.trash({
+    sourceDir: path.join(sessionRoot, "--tmp-project--", SESSION_A),
+    sessionId: SESSION_A
+  });
+  const purged = await service.purgeSessions({ trashIds: [item.trashId], acknowledge: true });
+  assert.equal(purged.purged, 1);
+  assert.deepEqual(registry.archivedSessionIds, [], "the dead archive entry is gone");
+  assert.deepEqual(registry.list()[0].sessionIds, [], "the dead workspace slot is gone");
+});
+
+test("a purge leaves a restored session alone", async (t) => {
+  // The bin copy and the live session are two different things: a session that
+  // was restored is on disk again, and purging the stale bin copy must not
+  // un-archive or ungroup the session the user still has.
+  const { service, store, registry, sessionRoot } = await fixture(t, {
+    archived: [SESSION_A],
+    workspaces: [{ path: "/tmp/project", sessionIds: [SESSION_A] }]
+  });
+  const { item } = await store.trash({
+    sourceDir: path.join(sessionRoot, "--tmp-project--", SESSION_A),
+    sessionId: SESSION_A
+  });
+  // The session is on disk again (a restore puts it back).
+  await fs.mkdir(path.join(sessionRoot, "--tmp-project--", SESSION_A), { recursive: true });
+  await fs.writeFile(path.join(sessionRoot, "--tmp-project--", SESSION_A, "session.v4.jsonl.zstd"), "x");
+  const purged = await service.purgeSessions({ trashIds: [item.trashId], acknowledge: true });
+  assert.equal(purged.purged, 1);
+  assert.deepEqual(registry.archivedSessionIds, [SESSION_A], "a session that exists keeps its archive entry");
+  assert.deepEqual(registry.list()[0].sessionIds, [SESSION_A], "and keeps its workspace");
 });

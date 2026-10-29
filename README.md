@@ -17,7 +17,7 @@ DSH 侧栏的会话菜单只有 **置顶 / 重命名 / 分叉 / 归档** 四项�
 - **删除会话**：菜单里的第五项，位置在归档之后，风格与其余四项一致。
 - **一次点击即删除**：安静的会话（没在工作、没被运行时占用）连对话框都不弹——点菜单就直接删，结果用可撤销的提示条报告；需要你同意的会话才弹对话框，主按钮叫 **删除**，仍有进行中的工作时变成 **强制删除**，点击后**删除必定完成**。
 - **批量删除**：多选、搜索、全选，逐项报告成功与失败。
-- **回收站**：删除是「移到回收站」而不是抹除，可随时恢复；侧栏有独立的回收站面板。
+- **回收站**：删除是「移到回收站」而不是抹除，可随时恢复；侧栏「更多」菜单里有独立的回收站面板。
 - **彻底删除**：只有显式勾选「我了解此操作无法恢复」之后才可执行。
 - **审计日志**：删除、恢复、彻底删除、以及每一次拒绝，都留痕。
 
@@ -107,7 +107,7 @@ profile 的软链直连 `~/.dsh/plugins/dsh-session-trash/`，不经过工作区
 ### 安装后验证
 
 1. 刷新页面。
-2. 侧栏应出现 **回收站** 入口。
+2. 侧栏的 **更多** 菜单里应出现 **回收站** 行。
 3. 任意会话行的 **「…」菜单** 中应出现 **删除会话** 与 **批量删除会话…**。
 
 若页面显示 "Failed to load plugins"，请参见 [故障排查](#故障排查)。
@@ -143,17 +143,13 @@ rm -rf ~/.dsh/session-trash
    没有「下一步」这一步：弹窗就是确认，点一下即删除。
 5. 会话立即从侧栏消失，右下角提示 **会话已删除**，并带 **撤销** 与 **查看回收站**。
 
-> **关于「强制删除」**：点击之后删除一定会完成——插件会先停掉工作、把会话归档以让运行时放手、等待其释放，若仍未释放则强制完成。**它不会出现「工作被停了但会话没删掉」的情况。** 强制完成时，提示条、审计日志与回收站记录里都会标明 `forced`。
+> **关于「强制删除」**：点击之后删除一定会完成——插件会先停掉工作、把会话归档以让运行时放手、等待其释放；若运行时仍不肯放手，插件会**直接把会话从 DSH 的运行时里拿下**（活会话注册表自带的释放器），然后再搬文件。**它不会出现「工作被停了但会话没删掉」的情况，也不会出现「删完了侧栏还留一行灰的」。** 强制完成时，提示条、审计日志与回收站记录里都会标明 `forced`。
 >
-> **强制删除后侧栏可能短暂留一行。** 原因是 DSH 的会话列表把**驻留内存**的会话也算进去，而 DSH 全产品没有「按 id 释放一个会话」的接口，所以当运行时不肯放开它时，文件进了回收站、内存里的会话对象还在，宿主仍会列出它。插件的处理是：
-> - 这一行**保持归档**（默认视图下归档会话是隐藏的），所以你看不到它；
-> - **不会**把它从原工作区挪走，因此它不会跑到「未分组」里；
-> - 你在回收站里**恢复**它，就一切回到正常（文件回来，它也能正常打开）；
-> - **重启 DSH 后它彻底消失**（进程重启后内存里不再有它）。
+> **只有在连运行时都拿不下时（极少见），侧栏才会留一行。** 那种情况下这一行**保持归档**（默认视图下归档会话是隐藏的），**不会**被挪到别的工作区（所以它不会跑到「未分组」里），并且插件会明确告诉你两条出路：**把侧边栏视图切到「隐藏已归档」**，或**重启 DSH**（进程重启后内存里不再有它）。你在回收站里**恢复**它，一切照常。
 >
-> 如果侧栏出现了标着 **已删除** 的残留行，它同样**可以勾选并删除**：没有文件可移动时，删除的含义就是「把它从列表里拿掉」（同理，它会保持归档，重启 DSH 后彻底消失）。
+> 如果侧栏出现了标着 **残留** 的行，它同样**可以勾选并删除**：没有文件可移动时，删除的含义就是「把它从列表里拿掉」（插件会尝试释放运行时；释放不了就保持归档，重启 DSH 后彻底消失）。
 >
-> **关于「当前打开的会话」**：会被删的会话如果正是你在看的那个，插件会先把视图切到另一个会话（没有其他会话时就释放当前视图），这是为了让运行时能放开它。你不需要自己先切换。
+> **关于「当前打开的会话」**：会被删的会话如果正是你在看的那个，对话框会先标出「当前会话」并说明**删除会立刻结束这段对话**；插件随后把视图切到另一个会话（没有其他会话时就释放当前视图），这是为了让运行时能放开它。你不需要自己先切换。
 
 ### 2. 批量删除
 
@@ -180,7 +176,7 @@ rm -rf ~/.dsh/session-trash
 
 **方式 B：回收站面板**
 
-1. 点击侧栏 **回收站** 入口。
+1. 打开侧栏的 **更多** 菜单，点击 **回收站**。
 2. 面板顶部显示条目数与占用空间；每条显示标题、删除时间（如 `12 分钟前`）、大小、原工作区路径。
 3. 恢复方式：
    - 单条：点击该行右侧的 **恢复** 图标按钮；
@@ -335,6 +331,12 @@ rm -rf ~/.dsh/session-trash
 - 该入口注册在 `sidebar.workspaces.session.menu.item` 槽位。刷新页面（客户端插件在页面刷新后加载）。
 - 若 DSH 版本较新且改名了该槽位，入口会静默缺席而不会报错——此时请看浏览器控制台是否有槽位相关警告。
 
+**侧栏「更多」里没有「回收站」**
+
+- 回收站不在侧栏常驻行里，而是「更多」下拉菜单中的一行，注册在 `sidebar.panellist.actions` 槽位（优先级 −10，排在宿主的「浏览更多插件 / 创建你的插件」之上）。
+- 该行是菜单组件，打开菜单时才会挂载；刷新页面后重新打开「更多」即可看到。
+- 若整页启动失败或该行缺席，看浏览器控制台的槽位相关警告——宿主若改了槽位名，这一行会静默消失。
+
 **删除被拒绝，提示"仍处于打开状态"**
 
 - 该会话在当前页面仍是活动的。切换到另一个会话（或删掉别的会话）后重试；插件随后会等待它释放。
@@ -350,7 +352,7 @@ rm -rf ~/.dsh/session-trash
 
 **删除被拒绝，提示某会话「无法删除」**
 
-- 未找到会话目录（`not-found`）：这种情况**不会**再被拒绝——列表里已经没有文件的会话会被**清出列表**（提示条会说「只从列表里移除了」）。若你看到这条旧的拒绝信息，说明宿主进程还在跑旧代码，重启 DSH 即可。
+- 未找到会话目录（`not-found`）：这种情况**不会**再被拒绝——列表里已经没有文件的会话会被**清出列表**：插件会把 DSH 运行时里对该会话的持有释放掉，并清掉归档集 / 工作区槽位里的残留记账，行随之彻底消失（提示条会说「已从列表和 DSH 运行时中清除」）。若运行时仍不肯放手，该行会被**归档隐藏**，并明确告诉你「把侧边栏视图切到『隐藏已归档』就不会再显示，重启 DSH 后彻底消失」——而不是把它伪装成已删除。若你看到旧的拒绝信息，说明宿主进程还在跑旧代码，重启 DSH 即可。
 - 提示 `unsafe-location`：会话存储报告了一个落在会话仓库之外的路径。这是包含性失败，出于安全考虑一律拒绝；请检查会话存储配置。
 
 **日志**
@@ -416,17 +418,17 @@ adds deletion without patching DSH.
   makes the move reversible byte-for-byte, then drops the id from DSH's durable accounting.
 - **Client half** (`lib/client.js`) adds a `删除会话` row (order 500) and a batch row (order 600) to
   the `sidebar.workspaces.session.menu.item` slot, a one-click confirmation dialog in
-  `shell.overlay`, a `回收站` sidebar entry and main panel, token-based CSS, and an undo flow. The
-  dialog releases the view's reference to the target first, because a session a view still holds
-  cannot be disposed by the host.
+  `shell.overlay`, a `回收站` row in the sidebar's 更多 menu and its main panel, token-based CSS,
+  and an undo flow. The dialog releases the view's reference to the target first, because a session
+  a view still holds cannot be disposed by the host.
 - **Safety**: it refuses to move a directory a live writer may still own *unless the user has
   consented to stopping that work* — and once they have, the delete always completes (stop →
   archive to release → bounded wait → force, all recorded). It refuses symlinks and any path
   outside the session store, never overwrites on restore, requires an explicit acknowledgement to
   purge, audits every mutation and refusal to an append-only NDJSON log, and never stops a user's
   work and then refuses to delete.
-- **Zero dependencies, no build step.** 137 tests run with `node --test` alone, plus a
-  render check against real React 18 (self-skips when React is absent; 140 total with it).
+- **Zero dependencies, no build step.** 169 tests run with `node --test` alone, plus a
+  render check against real React 18 (self-skips when React is absent; 173 total with it).
 
 ## License
 

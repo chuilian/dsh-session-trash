@@ -112,15 +112,46 @@ export function fakeWorkspaceRegistry({ archived = [], pinned = [], workspaces =
 
 /**
  * A fake `sessions` registry; ids listed in `resident` are reported as live.
+ *
+ * It mirrors the shape the host's live registry really has: a `store` map whose
+ * entries own a `detach()` disposer, and a `get()` that reports the session
+ * itself. Calling `detach()` is what removes the entry from the live set, which
+ * is how the plugin's release path is exercised.
+ *
  * @param {string[]} [resident] - ids that are resident in this process.
  * @returns {object} the fake registry.
  */
 export function fakeSessions(resident = []) {
   const live = new Set(resident);
+  const store = new Map();
+  /** Recording of flush/detach order, so a test can assert the barrier runs first. */
+  const order = [];
+  for (const id of resident) {
+    const entry = {
+      id,
+      session: { id },
+      detach() {
+        // The host's own detach is idempotent: a second call finds no entry.
+        if (store.get(id) !== entry) return;
+        order.push(`detach:${id}`);
+        store.delete(id);
+        live.delete(id);
+      }
+    };
+    store.set(id, entry);
+  }
   return {
     live,
+    store,
+    order,
     get(id) {
       return live.has(id) ? { id } : undefined;
+    },
+    async flush(session) {
+      // Mirrors `SessionStore.flush`: it requires the session to still be live.
+      if (store.get(session?.id) === undefined) throw new Error(`session "${session?.id}" is not live in this store`);
+      order.push(`flush:${session.id}`);
+      return true;
     }
   };
 }

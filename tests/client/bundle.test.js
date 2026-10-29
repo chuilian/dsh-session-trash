@@ -34,12 +34,28 @@ const PLATFORM_MODULES = [
 ];
 
 /** A minimal React stand-in: element creation plus the hooks the bundle uses. */
-function stubReact() {
+function stubReact(options = {}) {
+  // `stateful` keeps one state slot alive across calls, so a component that
+  // reads state in an effect can be re-rendered the way React would.
+  const slot = { value: null };
   return {
     Fragment: Symbol("Fragment"),
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
-    useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
-    useEffect: () => {},
+    useState: (initial) => {
+      if (options.stateful) {
+        if (slot.value === null) slot.value = typeof initial === "function" ? initial() : initial;
+        return [
+          slot.value,
+          (next) => {
+            slot.value = typeof next === "function" ? next(slot.value) : next;
+          }
+        ];
+      }
+      return [typeof initial === "function" ? initial() : initial, () => {}];
+    },
+    useEffect: (callback) => {
+      if (options.stateful) callback();
+    },
     useMemo: (factory) => factory(),
     useCallback: (fn) => fn,
     useRef: (initial) => ({ current: initial })
@@ -137,7 +153,7 @@ async function loadBundle(options = {}) {
     else globalThis.document = previousDocument;
   }
   const modules = {
-    react: stubReact(),
+    react: options.react ?? stubReact(),
     "@deepseek-ai/dsh-client-ui-primitives": stubPrimitives(),
     "@deepseek-ai/dsh-client-store": stubClientStore()
   };
@@ -283,19 +299,71 @@ test("apply registers the session menu rows with the archive-consistent order an
   for (const row of menu) assert.equal(typeof row.component, "function");
 });
 
-test("apply registers the overlays, the sidebar entry and the keyed main panel", async () => {
+test("apply registers the overlays, the 更多 menu row and the keyed main panel", async () => {
   const { exports } = await loadBundle();
   const ctx = fakeClientCtx();
   exports.apply(ctx);
   const byName = (name) => ctx.registrations.filter((row) => row.options.name === name);
   assert.equal(byName("shell.overlay").length, 1);
   assert.equal(byName("shell.overlay")[0].options.id, "session-trash.overlays");
-  const panelList = byName("sidebar.panellist");
-  assert.equal(panelList.length, 1);
-  assert.equal(panelList[0].options.id, "session-trash");
+  // The recycle bin no longer owns a permanent sidebar row: it is a row in the
+  // sidebar's 更多 menu instead.
+  assert.equal(byName("sidebar.panellist").length, 0, "the recycle bin must not draw a sidebar row");
+  const more = byName("sidebar.panellist.actions");
+  assert.equal(more.length, 1);
+  assert.equal(more[0].options.id, "session-trash.more");
+  // The shell sorts a list slot's rows on `order` alone, and its own rows
+  // register without an order (0), so a negative order puts ours first.
+  assert.equal(more[0].options.order, -20, "the row sorts above the shell's own menu rows");
+  assert.equal(more[0].options.priority, undefined, "priority does not reach the rendered order");
+  assert.equal(typeof more[0].component, "function");
   const main = byName("main");
   assert.equal(main.length, 1);
   assert.equal(main[0].options.key, "session-trash", "the main panel is keyed by the active panel id");
+});
+
+test("the 更多 row closes the menu and opens the recycle-bin panel", async () => {
+  const { exports } = await loadBundle();
+  const ctx = fakeClientCtx();
+  exports.apply(ctx);
+  const row = ctx.registrations.find((entry) => entry.options.name === "sidebar.panellist.actions").component;
+  const calls = [];
+  exports.__test.setContext({
+    get: (name) =>
+      name === "layout"
+        ? { selectPanel: (id) => calls.push(["select", id]) }
+        : undefined
+  });
+  const element = row({ onDismiss: () => calls.push(["dismiss"]) });
+  element.props.onSelect();
+  assert.deepEqual(calls, [
+    ["dismiss"],
+    ["select", "session-trash"]
+  ]);
+});
+
+test("the 更多 row marks itself current while the recycle bin is the open panel", async () => {
+  const { exports } = await loadBundle({ react: stubReact({ stateful: true }) });
+  const ctx = fakeClientCtx();
+  exports.apply(ctx);
+  const row = ctx.registrations.find((entry) => entry.options.name === "sidebar.panellist.actions").component;
+  exports.__test.setContext({
+    get: (name) =>
+      name === "layout"
+        ? {
+            panelInfo: {
+              getSnapshot: () => ({ activePanelId: "session-trash" }),
+              subscribe: () => () => {}
+            }
+          }
+        : undefined
+  });
+  row({ onDismiss: () => {} });
+  const element = row({ onDismiss: () => {} });
+  assert.equal(element.props.current, true, "the open panel marks its own menu row");
+  const label = element.children[0];
+  const parts = label.children.flat();
+  assert.ok(parts[1], "the current row draws the check mark");
 });
 
 test("every registration shares one store instance", async () => {
@@ -319,6 +387,7 @@ test("a composition without a layout service still registers the destructive act
   const names = ctx.registrations.map((row) => row.options.name);
   assert.ok(names.includes("sidebar.workspaces.session.menu.item"), "the delete action must survive");
   assert.ok(names.includes("shell.overlay"));
+  assert.ok(names.includes("sidebar.panellist.actions"), "the 更多 menu row must survive");
   assert.ok(!names.includes("main"), "the panel degrades away with its service");
 });
 
@@ -929,20 +998,107 @@ test("a listed session with no files reads as already deleted, not as a failure"
   assert.equal(summary.blockedCount, 1, "only the genuinely blocked row counts");
   assert.equal(summary.bytes, 10, "an already-deleted row reports no size");
 
-  // And the copy says so, in both languages.
+  // And the copy says so, in both languages. The note now promises the
+  // stronger thing the release path actually delivers: the row leaves the list
+  // and DSH's runtime, so it does not need a restart to disappear.
   assert.equal(dictionaries.zh["dialog.gone"], "已删除");
-  assert.match(dictionaries.zh["dialog.goneNote"], /重启/);
+  assert.match(dictionaries.zh["dialog.goneNote"], /清除/);
+  assert.match(dictionaries.zh["dialog.goneNote"], /运行时/);
   assert.equal(dictionaries.en["dialog.gone"], "Deleted");
-  assert.match(dictionaries.en["dialog.goneNote"], /restart/i);
+  assert.match(dictionaries.en["dialog.goneNote"], /Clearing/i);
+  assert.match(dictionaries.en["dialog.goneNote"], /runtime/i);
 });
 
-test("the forced-delete notice explains where the leftover row went", async () => {
+test("the forced-delete notice says the session was released; the residue notice says where the row went", async () => {
   const { exports } = await loadBundle();
   const { dictionaries } = exports.__test;
-  // Honest and actionable: archived out of sight now, gone after a restart.
-  assert.match(dictionaries.zh["notice.forced"], /归档/);
-  assert.match(dictionaries.zh["notice.forced"], /重启/);
-  assert.match(dictionaries.en["notice.forced"], /restart/i);
+  // A forced delete now takes the session down: the notice says so instead of
+  // promising a restart.
+  assert.match(dictionaries.zh["notice.forced"], /运行时/);
+  assert.match(dictionaries.zh["notice.forced"], /列表/);
+  assert.match(dictionaries.en["notice.forced"], /runtime/i);
+  // The residue notice is the one that still has to explain where a leftover row
+  // went: archived out of sight now, gone after a restart.
+  assert.match(dictionaries.zh["notice.residue"], /归档/);
+  assert.match(dictionaries.zh["notice.residue"], /重启/);
+  assert.match(dictionaries.en["notice.residue"], /restart/i);
+});
+
+test("the dialog says when the selection includes the session on screen", async () => {
+  const { exports } = await loadBundle();
+  const { dictionaries } = exports.__test;
+  // Deleting the session the user is in the middle of ends that conversation:
+  // the copy has to say so before the click, not after.
+  assert.match(dictionaries.zh["dialog.current"], /当前/);
+  assert.match(dictionaries.zh["dialog.current"], /回收站/);
+  assert.match(dictionaries.en["dialog.current"], /conversation/i);
+  assert.match(dictionaries.en["dialog.current"], /recycle bin/i);
+  assert.equal(typeof dictionaries.zh["dialog.currentTag"], "string");
+});
+
+test("a row the runtime still holds is a residue, and it is named as one", async () => {
+  // The 「已归档且删不掉」 case: the files are gone, but the runtime still holds
+  // the session, so the sidebar keeps drawing the row. Calling that 已删除 hides
+  // the fact that something still holds it, and the user is left with a grey row
+  // and a button that does nothing.
+  const { exports } = await loadBundle();
+  const { isGone, isResidue, summarizeSelection, dictionaries } = exports.__test;
+
+  const residue = { sessionId: "residue", deletable: false, clearable: true, exists: false, code: "not-found", resident: true };
+  const gone = { sessionId: "gone", deletable: false, clearable: true, exists: false, code: "not-found", resident: false };
+
+  assert.equal(isResidue(residue), true, "files gone + still held = a leftover");
+  assert.equal(isResidue(gone), false, "files gone + not held = a clean clear");
+  assert.equal(isGone(residue), true, "it is still a session without files");
+
+  const summary = summarizeSelection([residue, gone], ["residue", "gone"]);
+  assert.equal(summary.residueCount, 1, "only the one the runtime holds is a residue");
+  assert.equal(summary.goneCount, 2, "both rows have no files left");
+
+  // The copy has to name the way out, in both languages.
+  assert.match(dictionaries.zh["dialog.residueNote"], /重启 DSH/);
+  assert.match(dictionaries.zh["dialog.residueNote"], /隐藏已归档/);
+  assert.match(dictionaries.en["dialog.residueNote"], /restart/i);
+  assert.equal(dictionaries.zh["dialog.action.clearResidue"], "清除残留");
+  assert.equal(dictionaries.en["dialog.action.clearResidue"], "Clear residue");
+  assert.match(dictionaries.zh["notice.residue"], /重启 DSH/);
+  assert.match(dictionaries.en["notice.residue"], /restart/i);
+});
+
+test("the client closes the session scopes it opened for the sessions it deletes", async () => {
+  // Navigating the main view away is only half of the release: the session
+  // controller keeps a scope per opened session, and that scope is one of the
+  // things that keeps the host's runtime holding the session.
+  const { exports } = await loadBundle();
+  const { releaseClientScopes } = exports.__test;
+  const retired = [];
+  const dropped = [];
+  const sessions = {
+    scopes: new Map([["s1", { id: "s1" }]]),
+    retireScope(id) {
+      retired.push(id);
+      this.scopes.delete(id);
+    },
+    manager: {
+      sessions: new Map([["s2", { id: "s2" }]]),
+      async drop(id) {
+        dropped.push(id);
+      }
+    }
+  };
+  const ctx = {
+    get(name) {
+      if (name === "sessions") return sessions;
+      if (name === "uiWorkspace") return { mainReference: { sessionId: "s3" } };
+      return undefined;
+    }
+  };
+  const closed = await releaseClientScopes(["s1", "s2", "s3"], ctx);
+  assert.equal(closed, 2, "the open one is closed by the navigation, not by the scope release");
+  assert.deepEqual(retired, ["s1"]);
+  assert.deepEqual(dropped, ["s2"]);
+  // A host without the session controller must not break the delete.
+  assert.equal(await releaseClientScopes(["s1"], { get: () => undefined }), 0);
 });
 test("pure helpers: ids are chunked by the host's batch size", async () => {
   const { exports } = await loadBundle();

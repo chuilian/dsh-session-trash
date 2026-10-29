@@ -294,17 +294,21 @@ manifest 是恢复的唯一依据，所以先 fsync 再改名，而不是「写�
 
 ```
 1. 客户端先放手：目标里含当前打开的会话时，切到另一个幸存会话；没有幸存者就释放主选区
-   （uiWorkspace.openSession / clearMain）。释放引用是客户端的能力，不是用户的操作要求。
+   （uiWorkspace.openSession / clearMain），并关闭本客户端为这些会话开的 scope
+   （sessions.retireScope / sessions.manager.drop）。释放引用是客户端的能力，不是用户的操作要求。
 2. 宿主停止进行中的工作 —— 复用 workspaceRegistry.stopSessionActivity
    （归档流程用的同一条接缝，内部派发 workspace/session-stop 并行事件）。
 3. 宿主归档该会话 —— 复用 DSH 自己的 archiveSession(sessionId, { stopActivity: true })。
    归档是「让运行时可以放手」的机制：它门禁所有唤醒，并让持有主引用的客户端释放引用，
    于是运行时 dispose 会话、关闭持久化写句柄。
-4. 有界等待其离开内存（≤15 秒，夹取在服务层）。
-5. 仍未离开 → 若调用方传了 force，**照样移动**，并把 forced: true 记进 manifest、审计日志与提示条。
+4. 有界等待其离开内存（≤15 秒，夹取在服务层）；已同意强制的只探 250ms（FORCE_RELEASE_PROBE_MS）。
+5. 仍未离开 → 若调用方传了 force，**主动把会话从运行时拿下**：调用活会话注册表自带的
+   detach() 释放器（ctx.sessions.store.get(id).detach()），等最后一次 drain（RELEASE_SETTLE_MS）
+   之后再移动文件。释放器不可用或释放失败，才退化为「照样移动 + 保留归档」。
 6. 若移动最终失败，回滚第 3 步写入的归档，绝不让用户看到一个自己没归档却被隐藏的会话。
-7. 记账收尾：干净删除 → 移除归档 id；强制删除 → **保留**归档 id（这是唯一能隐藏残留行的状态）。
-   两种情况都**不做 detach**，因为 detach 会把残留行推进「未分组」。详见 §5.2。
+7. 记账收尾：释放成功 → 移除归档 id（行彻底消失）；运行时仍持有 → **保留**归档 id
+   （这是唯一能隐藏残留行的状态），并如实返回 residue: true。两种情况都**不做 detach**，
+   因为 detach 会把残留行推进「未分组」。详见 §5.2。
 ```
 
 **为什么必须有第 5 步（force）**：没有它，一个运行时始终不肯放手的会话就永远只能被拒绝——
@@ -356,20 +360,24 @@ switch (archivedFilter) {
 **① 绝不 detach。**
 detach 会把 id 从它所属的 workspace 里摘掉，于是「列表里还有、但没人认领」→ 正好落进**未分组**。惰性 id 本身是无害的（`groupByWorkspace` 遇到 `summary === undefined` 会跳过），而且保留归属还有一个好处：**恢复时会话回到原来的工作区**，不需要按 `cwd` 反猜。
 
-**② 强制删除后**保持归档**。**
-强制删除是唯一会出现「文件已移走、运行时仍持有该会话」的情形。DSH 的会话列表把**活的**会话也算进去（`dsh-session-query` 的 `listSessions`：`records.set(session.id, {live:true})`），而全产品**没有任何 dispose-by-id 接口**（`SessionStore` 只有 `create/prepare/enter/detachEntered/announce/emitDisposed/flush/get/list/fork`，`detachEntered` 需要内部 entry；客户端的 Remote 会话 API 也只有 `list/search/create/rename/fork/prompt/cancel/…`）。因此这个残留行会一直存在到**进程重启**为止，而**归档是唯一能隐藏它的状态**（`case "default": return !archived.has(id)`）。
+**② 只有「运行时仍持有」时才保持归档。**
+强制删除原本是唯一会出现「文件已移走、运行时仍持有该会话」的情形。DSH 的会话列表把**活的**会话也算进去（`dsh-session-query` 的 `listSessions`：`records.set(session.id, {live:true})`），而全产品**没有任何公开的 dispose-by-id 接口**（`SessionStore` 只有 `create/prepare/enter/detachEntered/announce/emitDisposed/flush/get/list/fork`，`detachEntered` 需要内部 entry；客户端的 Remote 会话 API 也只有 `list/search/create/rename/fork/prompt/cancel/…`）。但活会话注册表**自己给每个会话一个 entry，entry 自带 `detach()` 释放器**（`ctx.sessions.store.get(id).detach()` → `detachEntered` → 删除 entry、关闭写句柄、`emitDisposed` → 宿主 `session/disposed` → `api-session/removed`）。插件用它把会话真正拿下：释放成功 → 宿主不再列出它 → **行彻底消失**，归档 id 也随之移除；释放器不可用或释放失败（唯一的残留情形）→ 行会一直存在到**进程重启**，而**归档是唯一能隐藏它的状态**（`case "default": return !archived.has(id)`）。
 
-反过来说：非强制（干净）删除时，会话已被 dispose，宿主不会再列出它，残留不可能存在——所以那时**必须** unarchive，否则一个已删除的会话会莫名其妙留在「显示已归档」里。
+反过来说：释放成功时**必须** unarchive，否则一个已经彻底消失的会话会莫名其妙留在「显示已归档」里。
 
 | 删除类型 | 归档集合 | detach | 结果 |
 |---|---|---|---|
 | 干净（会话已释放） | **移除** id | 不做 | 行彻底消失 |
-| 强制（运行时仍持有） | **保留** id | 不做 | 行被默认过滤器隐藏；重启后彻底消失 |
+| 强制且释放成功 | **移除** id | 不做 | 行彻底消失（会话被从运行时拿下） |
+| 运行时拒绝释放（残留） | **保留** id | 不做 | 行被默认过滤器隐藏；重启后彻底消失 |
 
 配套的 UI 处理：宿主 `plan` 对「列表里有、磁盘上没有」的会话返回 `not-found`，客户端把它显示为**已删除**（而不是「不可删除」），并且**不计入**「无法删除」的计数——否则用户会以为自己的删除失败了。
 
 **③ 无文件的会话可以被删（清出列表），不是「删不掉」。**
-`not-found` 只是「没有目录可移动」，它不等于「不能删」。宿主的 `#clearFileless` 把它走成一条独立的成功路径：需要同意时先停工作、驻留时归档隐藏、`emit "api-session/removed"`，审计记 `delete:cleared`，返回 `{ok:true, cleaned:true, trashId:null}`（没有回收站条目，因此 UI 的**撤销**不会为它出现，提示条也如实说「只从列表里移除」）。仍然被拒绝的只有两件：无法安全确认的路径（`unsafe-location` / `invalid-session-id`）与未经同意的 `session-active` / `session-live`——而拒绝也带着 `code`/`message` 回到界面，不用 `disabled` 控件替用户做决定（FR-2.9）。残余风险：若文件其实存在、但三层定位都没找到（目录名非标准且后端也报不出路径），清出列表不会搬走它们——这是既有的定位盲区，`totalBytes: 0` 与「只从列表里移除」的措辞都不会谎称已经移入回收站。
+`not-found` 只是「没有目录可移动」，它不等于「不能删」。宿主的 `#clearFileless` 把它走成一条独立的成功路径：需要同意时先停工作；若运行时仍持有该会话，先归档隐藏，再**主动释放**（调用宿主 live registry 自带的 `detach()` 释放器，DSH 没有公开的 dispose-by-id API），释放成功后把归档集、工作区槽位、置顶里的残留记账一并清掉，行彻底消失；释放失败才退回归档隐藏，并如实返回 `residue: true` 与出路文案（「已归档隐藏，重启 DSH 后彻底消失」）。全程 `emit "api-session/removed"`，审计记 `delete:cleared`，返回 `{ok:true, cleaned:true, trashId:null}`（没有回收站条目，因此 UI 的**撤销**不会为它出现，提示条也如实说「已从列表和 DSH 运行时中清除」）。仍然被拒绝的只有两件：无法安全确认的路径（`unsafe-location` / `invalid-session-id`）与未经同意的 `session-active` / `session-live`——而拒绝也带着 `code`/`message` 回到界面，不用 `disabled` 控件替用户做决定（FR-2.9）。残余风险：若文件其实存在、但三层定位都没找到（目录名非标准且后端也报不出路径），清出列表不会搬走它们——这是既有的定位盲区，`totalBytes: 0` 与「已从列表和运行时中清除」的措辞都不会谎称已经移入回收站。
+
+**④ 释放为什么必须由插件来做（`「已归档且删不掉」` 的根因）。**
+DSH 的宿主在客户端打开一个会话的事件流时，会把这个**冷会话**（文件已不在、只剩投影缓存）**激活**（`promote` → `resume`），把它放进宿主的活会话注册表，于是宿主持续在列表里列出它。用户点过那一行，行就活了；此后插件的预检看到 `resident: true`，既不能删（没有目录可搬），也删不掉（运行时还持有）。旧实现只做了「归档隐藏」——归档集是唯一能藏住一行的状态，但归档集本身不会让行消失，于是留下一个灰行、对话框写着「已归档」、点删除没有反应。这不是用户操作的问题，是插件的缺陷：新实现主动释放运行时 + 清掉全部残留记账，客户端另外把这类行标成**残留**（不是「已删除」），并给出「切到『隐藏已归档』」或「重启 DSH」这两条出路。
 
 ### 5.3 通知客户端
 
@@ -475,7 +483,7 @@ DSH 的 Remote 命名空间是**构建期**由 `@deepseek-ai/dsh-typert-generato
 | `sidebar.workspaces.session.menu.item` | `session-trash.delete` | 500 | 「删除会话」 |
 | `sidebar.workspaces.session.menu.item` | `session-trash.delete-batch` | 600 | 「批量删除会话…」（带分隔线） |
 | `shell.overlay` | `session-trash.overlays` | — | 两步确认对话框、彻底删除对话框、撤销提示 |
-| `sidebar.panellist` | `session-trash` | 50 | 侧栏「回收站」入口（图标 + label） |
+| `sidebar.panellist.actions` | `session-trash.more` | −20 | 侧栏「更多」菜单里的「回收站」行（排在宿主内置两行之前） |
 | `main`（keyed） | key `session-trash` | — | 回收站主面板页 |
 
 `shell.overlay` 是必须的：会话菜单行会随菜单卸载，对话框不能挂在行内。这也是 DSH 自己的重命名/归档对话框的做法。
@@ -628,7 +636,7 @@ CSS 全部使用 DSH 自己的设计令牌（`--dsw-alias-label-primary`、`--ds
 | 18 | 低 | 死代码与陈旧注释（`#inFlight` 永不为真、`trash()` 的包含性注释与实际不符、`enabled` 只读一次、`expired` 与 `stats` 用了不同时钟、`actor: undefined` 会抹掉默认值） | 逐条修正；`enabled` 改为逐请求读取 |
 | 19 | 低 | 未使用/不可达的表层：`panel.purgeAll`（「清空回收站」）在文档里存在但 UI 永远不会发 `["*"]`；删除失败只报数量不报原因；未用导入与 prop | UI 接上「清空回收站」；失败原因汇总展示；清理未用项 |
 | 20 | **高（用户实测报告）** | 同意「停止并删除」后，宿主**先停掉了用户的工作**，再因为运行时不肯释放该会话而拒绝删除 → 用户既丢工作又删不掉；代码注释声称「客户端会先导航离开」但从未实现 | 客户端先放手（`openSession` / `clearMain`）；宿主归档以促成释放；有界等待后按 `force` 强制完成并留痕；失败则回滚归档。回归测试 R17–R20 |
-| 21 | **高（用户实测报告）** | 在「工作」项目里删除一个会话后，它出现在了**未分组**里，而且再也删不掉（显示「不可删除」）。取证：`plan` 返回 `resident: true, exists: false`；manifest 记录 `forced: true` | 根因是**强制删除会留下活的会话对象**：DSH 的 `listSessions` 把 live 会话也算进列表，而全产品没有 dispose-by-id 接口，所以文件没了行还在；**再叠加我的 detach**，这行就正好落进「未分组」（该桶的定义就是「列表里有、没有 workspace 认领」）。修复：① 绝不 detach；② 强制删除**保持归档**（归档是默认过滤器下唯一能隐藏一行的状态）；③ 列表里无文件的会话在 UI 上显示为**已删除**而不是「不可删除」，且不计入失败数。回归测试 R21–R24 |
+| 21 | **高（用户实测报告）** | 在「工作」项目里删除一个会话后，它出现在了**未分组**里，而且再也删不掉（显示「不可删除」）。取证：`plan` 返回 `resident: true, exists: false`；manifest 记录 `forced: true` | 根因是**强制删除会留下活的会话对象**：DSH 的 `listSessions` 把 live 会话也算进列表，而全产品没有公开的 dispose-by-id 接口，所以文件没了行还在；**再叠加我的 detach**，这行就正好落进「未分组」（该桶的定义就是「列表里有、没有 workspace 认领」）。修复：① 绝不 detach；② 归档 id 的去留改为由「运行时是否放手」决定——放得了就清掉（行彻底消失），放不了才保留归档（归档是默认过滤器下唯一能隐藏一行的状态）；③ 列表里无文件的会话在 UI 上显示为**残留**而不是「不可删除」，且不计入失败数。回归测试 R21–R24 |
 | 22 | **高（用户实测报告）** | 删掉整个工作区后残留的会话落进「未分组」，批量删除时**勾不上**（复选框灰显）。取证：`plan` 返回 `deletable:false, exists:false, resident:true, archived:true, code:'not-found'`；用户原话「所有的删除应该由我决定能不能删，而不是直接把这个决定给定死」 | 两处都把决定权拿走了：① 客户端 `disabled: !deletable` + `全选` 过滤，而 `deletable` 只表示「磁盘上有目录」；② 宿主 `#deleteOne` 在 `!located.ok` 时直接拒绝，`not-found` 没有任何出口。修复：取消所有勾选门禁（禁用条件只剩「一个都没选」）、提交全部选中项、宿主新增 `#clearFileless` 把无文件的行**清出列表**（停工作需同意 / 归档隐藏 / `emit removed` / 审计 `delete:cleared` / 返回 `cleaned:true`），提示条不再对这类行说「已移入回收站」。安全边界保留为**带原因的拒绝**（`unsafe-location`、未经同意的 `session-active`/`session-live`），而不是灰按钮。回归测试：宿主 `a delete of a missing session clears the row…`、`a delete of a fileless resident session hides it…`、`a fileless session still needs consent…`，客户端 `canAdvance` / `buildDeletePayload` / `trashIdsOf` |
 | 23 | **高（用户实测报告）** | §5.9 的门禁修好、重启 DSH 后，用户报告**勾选依然完全无效**：复选框已不灰显，但「已选择」永远是 0。取证：`dsh-client-ui-primitives` 的 `Checkbox({checked, onChange, label, disabled})` 用法正确；`lib/client.js` 的 `DeletePickStep` 三处（勾选 / `全选` / `取消选择`）调用了**未声明的裸函数** `patchDialog(...)`——该名字只存在于 store action 上，模块里从未定义 → 每次点击抛 `ReferenceError: patchDialog is not defined`（从 1.0 起就存在，与本轮门禁无关） | 三处改为 `storeInstance.actions.patchDialog({...})`（`lib/client.js:698/727/731`）。回归护栏：渲染层改为**驱动控件**（记录 Checkbox/Button 的 props 并代真实点击），断言选中状态、`/session-trash/delete` 的请求体与撤销项；改回裸调用即以 `ReferenceError` 失败。另加全模块裸调用扫描，确认没有第二处悬空引用 |
 
@@ -678,6 +686,7 @@ CSS 全部使用 DSH 自己的设计令牌（`--dsw-alias-label-primary`、`--ds
 | 29 | **中（安全相关）** | 停止工作的路径依赖 `workspaceRegistry.stopSessionActivity`——它是注册表的 **TS `private`** 成员（上游自己内部就是 `ctx.parallel('workspace/session-stop')` 的一层包装）。私有成员可以被改名或改成真正的 `#private` 而无需通知；届时插件的 `typeof === "function"` 守卫会**静默跳过停止** → 用户明明点了「强制删除（会先停止工作）」，会话却带着仍在运行的工作被搬走 | 公开契约 `ctx.parallel("workspace/session-stop", { sessionId })` 作为**回退**：注册表接缝在时行为完全不变，接缝消失时走公开瀑布流。回归测试 R28（注册表没有该接缝时，公开瀑布流仍被派发） |
 | 30 | 低 | 审计日志只追加、从不轮转，而 `limit` 原样透传 → 一个请求就能把**全部历史**读进内存；`limit=0` 还会返回 1 条记录 | 路由层夹到 `[0, 10000]`，存储层按夹取后的值精确截断（`limit=0` 返回空）。回归测试 R29 + 路由用例 |
 | 31 | 低 | 抑制重复告警的 `warnedResidency` 集合与宿主进程同寿且**从不清理** → 随进程探过的每个会话增长 | 上限 256 条，满了淘汰最旧的一条（Set 保序）。回归测试 R30 |
+| 32 | **高（用户实测报告）** | 用户删掉**正在对话的那个会话**（会话正跑着一轮对话），侧栏那一行**仍然留着**，点它弹出「已归档对话暂时无法查看，请取消归档后再看」——一个打不开、也删不掉的僵尸行。取证：审计日志 `trash … forced=true` → `restore … ok`（用户随后点了恢复）；`plan` 返回 `resident: true, running: true, activity: [{kind:"turn"}]` | 两个原因叠加：① `stopActivity` 的 `sessionController.cancel` **掐不断在飞的模型请求**，于是 `waitForRelease` 在强制的 250ms 预算内必然超时 → `forced=true`；② 旧实现把 `forced` 当成「归档 id 保留」的信号，于是会话被**归档**而不是被释放，宿主仍在列表里列出它 → 灰行 + 「已归档」+ 删除无效。修复：① 强制删除时**主动把会话从运行时拿下**（`ctx.sessions.store.get(id).detach()`，活会话注册表自带的释放器），等最后一次 drain 后再搬文件，释放成功即 `released: true` / `residue: false`，归档 id 随之移除 → 行彻底消失；② 只有释放器不可用或释放失败才保留归档，并如实返回 `residue: true` + 出路文案；③ 客户端在对话框里给「当前正在看的会话」加「当前会话」标签并写明「删除会立刻结束这段对话」。回归测试 R18（强制删除把会话拿下）、R22（运行时拒绝释放才保持归档） |
 
 > **仍然成立但值得记录的脆弱性**：`sessionPersistence.root` 与 `locate()`、`workspaceRegistry.stopSessionActivity()`
 > 都是上游的**非契约成员**（TS `private` 或抽象类之外）。它们在 `dsh-v0.2.0-rc.2` 上运行时都存在，插件对缺失也有回退

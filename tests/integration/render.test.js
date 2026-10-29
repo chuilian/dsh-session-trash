@@ -72,7 +72,8 @@ function stubPrimitives(React) {
     IconUnarchiveOutlineRegular: (props) => h("svg", { "data-icon": "unarchive" }),
     IconRefreshOutlineRegular: (props) => h("svg", { "data-icon": "refresh" }),
     IconWarningOutlineRegular: (props) => h("svg", { "data-icon": "warning" }),
-    IconLoadingOutlineRegular: (props) => h("svg", { "data-icon": "loading" })
+    IconLoadingOutlineRegular: (props) => h("svg", { "data-icon": "loading" }),
+    IconCheckOutlineRegular: (props) => h("svg", { "data-icon": "check", width: props.size ?? 16 })
   };
 }
 
@@ -471,11 +472,12 @@ test("the rendered markup carries the real content, not an empty shell", async (
   assert.ok(overlay, "the overlay host must be registered");
   store.actions.setDialog({
     mode: "batch",
-    sessionIds: ["a", "c"],
-    titleById: { a: "Alpha", c: "Residue" },
+    sessionIds: ["a", "c", "g"],
+    titleById: { a: "Alpha", c: "Residue", g: "Gone" },
     plans: [
       { sessionId: "a", deletable: true, exists: true, bytes: 10, resident: false, activity: [], running: false },
-      { sessionId: "c", deletable: false, exists: false, bytes: 0, code: "not-found", resident: true, archived: true, activity: [] }
+      { sessionId: "c", deletable: false, exists: false, bytes: 0, code: "not-found", resident: true, archived: true, activity: [] },
+      { sessionId: "g", deletable: false, exists: false, bytes: 0, code: "not-found", resident: false, activity: [] }
     ],
     selectedIds: [],
     pending: false,
@@ -485,10 +487,19 @@ test("the rendered markup carries the real content, not an empty shell", async (
   const pickMarkup = server.renderToStaticMarkup(
     react.createElement(overlay.component, { t: t_, useStore: (selector) => selector(store.getSnapshot()) })
   );
-  assert.equal((pickMarkup.match(/type="checkbox"/g) ?? []).length, 2, "every candidate row must offer a checkbox");
+  assert.equal((pickMarkup.match(/type="checkbox"/g) ?? []).length, 3, "every candidate row must offer a checkbox");
   assert.doesNotMatch(pickMarkup, /<input[^>]*disabled/, "no candidate checkbox may be disabled — the user decides");
   assert.match(pickMarkup, /Residue/, "the fileless residue row must still be listed");
-  assert.match(pickMarkup, /dialog\.gone/, "the fileless row must still say why it has nothing behind it");
+  assert.match(
+    pickMarkup,
+    /dialog\.residue/,
+    "a fileless row the runtime still holds is a residue — calling it 已删除 would hide what holds it"
+  );
+  assert.match(
+    pickMarkup,
+    /dialog\.gone/,
+    "a fileless row the runtime does not hold is simply gone, and must still say why it has nothing behind it"
+  );
 
   // An unknown activity state is not "work in progress": the host could not find
   // out, and the row has to say exactly that.

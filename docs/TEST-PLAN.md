@@ -168,9 +168,9 @@
 |---|---|---|
 | 1 | **加载产物：id、require 集合、inject** | id = `dsh-session-trash`；require 恰为 3 个平台模块；`inject` 为 `[]` |
 | 2 | 会话菜单两项的 id/order/locale | 500 与 600，locale = `sessionTrash`，组件是函数 |
-| 3 | overlay / panellist / keyed main 注册 | `session-trash.overlays`；panellist id `session-trash`；main 的 `key` = `session-trash` |
+| 3 | overlay / 更多菜单行 / keyed main 注册 | `session-trash.overlays`；`sidebar.panellist` 缺席；`sidebar.panellist.actions` id `session-trash.more`（order −20、无 priority）；main 的 `key` = `session-trash` |
 | 4 | **所有注册共享同一 store 实例** | 两个声明 store 的注册项 `.create()` 返回同一对象 |
-| 5 | **缺 layout 服务时破坏性入口仍在** | 菜单与会话 overlay 仍注册；`main` 缺席（降级而非崩） |
+| 5 | **缺 layout 服务时破坏性入口仍在** | 菜单、会话 overlay 与「更多」菜单行仍注册；`main` 缺席（降级而非崩） |
 | 6 | 大小与时间文案 | B/KB/MB；刚刚/分钟/小时/天 |
 | 7 | 同意判定与活动扁平化 | `isDeletable` / `needsConsent` / `activityRows`（turn、job items） |
 | 8 | 选择汇总含真实字节数 | `bytes` 求和；`canAdvance` 对全阻塞/空选择为 false |
@@ -187,10 +187,11 @@
 | 18 | **按钮文案是「删除」而不是「移入回收站」** | 中英文都断言；同时断言文案里不存在残留的「下一步」/ `dialog.step2` 键 |
 | 19 | 渲染后的对话框只有一个破坏性动作 | 一致性按钮与强制删除变体的文案 |
 | 20 | **列表里无文件的会话显示为「已删除」** | `isGone` 的三种判据；`goneCount` 与 `blockedCount` 的区分；中英文文案 |
-| 21 | 强制删除的提示条说明残留去向 | 断言文案含「归档」与「重启」 |
+| 21 | 强制删除与残留的提示条各说各的 | 强制删除的文案含「运行时」「列表」；残留的文案含「归档」与「重启」 |
 | 22 | **批量列表排除已删除/已归档的行** | `batchVisiblePlans` 保留普通行与「仅被阻塞」的行，剔除 `archived` 与 `gone`（两种判据）；`isGone` 三种判据；空输入 → `[]` |
 | 23 | **批量对话框不再列出已删除/已归档会话** | 宿主预检返回三者时，`plans` 与 `sessionIds` 只剩可删的那一个 |
 | 24 | **单会话对话框仍显示被点名的残留行** | 批量规则不得吞掉单会话入口 |
+| 25 | **对话框说明「删除当前会话会结束这段对话」** | `dialog.current`（中英文）与 `dialog.currentTag` |
 
 ### 2.7 `tests/host/regressions.test.js`（17）
 
@@ -216,11 +217,11 @@
 | R15 | `expired` 标记与 `expiredCount` 可能用不同时钟 → 断言同源一致 |
 | R16 | 符号链接源目录 → 断言 `symlink-refused` |
 | R17 | **用户报告**：同意停止后，因视图仍持有会话而被拒绝 → 断言释放成功、删除完成、且用于释放的归档没有泄漏到记账里 |
-| R18 | **用户报告**：运行时始终不放手时删除变成死胡同 → 断言 `force` 完成删除、结果与 manifest 都记 `forced`、审计有记录 |
+| R18 | **用户报告**：删除正在对话的会话后侧栏留下一行打不开的「已归档」僵尸 → 断言 `force` 把会话从运行时拿下（`released: true`、`residue: false`）、归档 id 被移除、manifest 记 `forced`、审计有记录 |
 | R19 | 释放用的归档在删除失败后必须回滚 → 断言归档集合恢复为空 |
 | R20 | 未同意时的拒绝零副作用 → 断言既没停止工作也没写归档、更没移动文件 |
-| R21 | **用户报告**：删除后残留行落进「未分组」 → 断言强制删除**不 detach**、工作区归属保留 |
-| R22 | **用户报告**：残留行删不掉 → 断言强制删除**保持归档**（默认过滤器下唯一能隐藏一行的状态）、结果带 `residue: true` |
+| R21 | **用户报告**：删除后残留行落进「未分组」 → 断言强制删除**不 detach**、工作区归属保留、会话已释放 |
+| R22 | **用户报告**：残留行删不掉 → 断言**运行时拒绝释放**时强制删除**保持归档**（默认过滤器下唯一能隐藏一行的状态）、结果带 `released: false` 与 `residue: true` |
 | R23 | 干净删除仍必须清除归档 id → 否则已删除的会话留在「显示已归档」里 |
 | R24 | 恢复一个强制删除的会话 → 断言它留下的归档 id 被清掉，会话可见 |
 
@@ -395,11 +396,13 @@ $ NODE_PATH=/tmp/react-check/node_modules node --test --test-concurrency=1 "test
 | F13 恢复 `session-` 前缀要求 | 两处「非常规但安全 id」用例失败 |
 | F15 去掉 `#restoreAccounting` | R11 失败 |
 | F20 去掉 `force` 回退（用户报告的缺陷） | R18、R19 失败 |
+| F20 去掉强制删除时的运行时释放（活会话注册表的 `detach()`） | R18 失败（`released` 变回 `false`）、R21 失败 |
+| F20 客户端不再关闭自己开的会话 scope | 客户端「客户端关闭它自己打开的会话 scope」用例失败 |
 | F20 去掉客户端的视图释放 | 客户端「删除前释放视图」用例失败 |
 | F20 客户端不再发送 `force` | 客户端两条删除流程用例失败 |
 | F21 按钮文案改回「移入回收站」 | 客户端文案用例失败 |
 | F22 重新加上 detach 步骤 | R11、R21 失败 |
-| F22 强制删除后也 unarchive | R11、R17、R22、R23、R24 失败 |
+| F22 强制删除后也 unarchive（即使运行时仍持有） | R11、R17、R22、R23、R24 失败 |
 | F22 恢复时不再权威地写归档状态 | R24 失败 |
 
 第一版的 R3 **没有通过**这项检查——它模拟的是修复**之后**的磁盘状态，因此对修复前后的实现都会通过。

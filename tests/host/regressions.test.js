@@ -466,13 +466,21 @@ test("R16: a symlinked source inside the store is still refused", async (t) => {
  * Build a service whose registry behaves like DSH's: archiving a session makes the
  * client drop its main reference, which lets the host dispose it. That causal chain
  * is what the release path depends on, so the fake reproduces it.
+ *
+ * `detachable: false` models the one case the release path cannot win: a live
+ * session whose registry entry has no disposer, so the host cannot take it down
+ * and the row has to stay archived.
  */
-async function releaseFixture(t, { releaseOnArchive = true, waterfall } = {}) {
+async function releaseFixture(t, { releaseOnArchive = true, waterfall, detachable = true } = {}) {
   const root = await tempDir(t);
   const sessionRoot = path.join(root, "sessions");
   const cwd = "/tmp/project";
   const sessionDir = await seedSession({ root: sessionRoot, cwd, sessionId: SESSION_A, contents: "work\n" });
   const sessions = fakeSessions([SESSION_A]);
+  if (!detachable) {
+    // The session is live, but the registry has no disposer for it.
+    sessions.store.delete(SESSION_A);
+  }
   const registry = fakeWorkspaceRegistry({ workspaces: [{ path: cwd, sessionIds: [SESSION_A] }] });
   if (releaseOnArchive) {
     const archive = registry.archiveSession.bind(registry);
@@ -512,11 +520,16 @@ test("R17: a running session the view holds can still be deleted (release then m
   assert.deepEqual(registry.archivedSessionIds, []);
 });
 
-test("R18: force deletes a session that never releases, and says so", async (t) => {
+test("R18: a forced delete takes the session down instead of leaving a zombie row", async (t) => {
   // Without a force, a session the runtime never lets go of can only be refused —
   // which is exactly the dead end the user hit. Force must complete the delete and
   // leave an auditable trace of the fact.
-  const { service, store } = await releaseFixture(t, { releaseOnArchive: false });
+  //
+  // What used to happen after the refusal: the files moved while the runtime kept
+  // the session, the session stayed archived, and the sidebar kept drawing a row
+  // that could no longer be opened ("已归档对话暂时无法查看"). The forced delete now
+  // takes the session down through the live registry, so the row goes with it.
+  const { service, store, registry, sessions } = await releaseFixture(t, { releaseOnArchive: false });
   const refused = await service.deleteSessions({ sessionIds: [SESSION_A], stopActivity: true, waitForReleaseMs: 120 });
   assert.equal(refused.deleted, 0);
   assert.equal(refused.results[0].code, "session-live");
@@ -528,8 +541,22 @@ test("R18: force deletes a session that never releases, and says so", async (t) 
     waitForReleaseMs: 120
   });
   assert.equal(forced.deleted, 1, JSON.stringify(forced.results));
-  assert.equal(forced.results[0].forced, true, "the outcome reports that it was forced");
-  assert.equal(forced.results[0].released, false);
+  assert.equal(forced.results[0].forced, true, "the outcome reports that it was a forced delete");
+  assert.equal(forced.results[0].released, true, "the runtime let the session go");
+  assert.equal(forced.results[0].residue, false, "nothing is left behind for the sidebar to draw");
+  // The last buffered events must be durable BEFORE the detach: after it the
+  // session is no longer live, so `flush()` can no longer run, and the backend's
+  // asynchronous close-drain would race the directory move.
+  assert.deepEqual(
+    sessions.order,
+    [`flush:${SESSION_A}`, `detach:${SESSION_A}`],
+    "the durability flush runs first, while the session is still in the live registry"
+  );
+  assert.deepEqual(
+    registry.archivedSessionIds,
+    [],
+    "the archive used to release the session is lifted again — the row is gone, not hidden"
+  );
 
   const items = await store.list();
   assert.equal(items.length, 1);
@@ -592,6 +619,7 @@ test("R21: a forced delete never detaches, so no residue reaches the ungrouped b
   });
   assert.equal(outcome.deleted, 1, JSON.stringify(outcome.results));
   assert.equal(outcome.results[0].forced, true);
+  assert.equal(outcome.results[0].released, true, "the session was taken down, so no row is left");
   assert.ok(
     !registry.calls.some((call) => call.op === "detach"),
     "detaching is what pushed the residue into the ungrouped bucket"
@@ -599,12 +627,12 @@ test("R21: a forced delete never detaches, so no residue reaches the ungrouped b
   assert.deepEqual(registry.list()[0].sessionIds, [SESSION_A], "the workspace link is kept");
 });
 
-test("R22: a forced delete leaves the session archived so the residue is hidden", async (t) => {
-  // There is no dispose-by-id anywhere in DSH, so a session the runtime still holds
-  // outlives its files and the host keeps listing it. Archived is the only state
-  // that hides a row: the sidebar's sessionVisible() returns !archived.has(id) under
-  // its default filter. Un-archiving here is what made the leftover visible.
-  const { service, registry } = await releaseFixture(t, { releaseOnArchive: false });
+test("R22: a forced delete the runtime refuses leaves the row archived instead", async (t) => {
+  // The last resort: the live registry has no disposer for this session, so even a
+  // forced delete cannot take it down. Archived is the only state that hides a row:
+  // the sidebar's sessionVisible() returns !archived.has(id) under its default
+  // filter. Un-archiving here is what made the leftover visible.
+  const { service, registry } = await releaseFixture(t, { releaseOnArchive: false, detachable: false });
   const outcome = await service.deleteSessions({
     sessionIds: [SESSION_A],
     stopActivity: true,
@@ -612,6 +640,7 @@ test("R22: a forced delete leaves the session archived so the residue is hidden"
     waitForReleaseMs: 80
   });
   assert.equal(outcome.deleted, 1, JSON.stringify(outcome.results));
+  assert.equal(outcome.results[0].released, false, "the runtime kept the session");
   assert.equal(outcome.results[0].residue, true, "the outcome tells the UI a residue may remain");
   assert.ok(registry.archivedSessionIds.includes(SESSION_A), "the residue stays archived (hidden)");
 });
@@ -629,7 +658,9 @@ test("R23: a quiet delete still clears the archive set", async (t) => {
 
 test("R24: restoring a forced delete clears the archive id it left behind", async (t) => {
   // Otherwise undo would return a session that stays hidden in the archive view.
-  const { service, registry, store } = await releaseFixture(t, { releaseOnArchive: false });
+  // The fixture is the one case where a forced delete cannot take the session down,
+  // so the archive id really is left behind and the restore has to clean it up.
+  const { service, registry, store } = await releaseFixture(t, { releaseOnArchive: false, detachable: false });
   const deleted = await service.deleteSessions({
     sessionIds: [SESSION_A],
     stopActivity: true,
@@ -865,4 +896,129 @@ test("R30: the residency warning set cannot grow without bound", async (t) => {
   const after = warnings();
   isResident(ctx, "session-399");
   assert.equal(warnings(), after, "a probe just warned is not warned about again");
+});
+
+test("R31: a delete leaves an audit record that says whether the runtime let go", async (t) => {
+  // The audit trail has to answer the one question a leftover row raises: did the
+  // session really go away, or is it only hidden? The move alone cannot tell —
+  // `forced` only says the caller consented to stopping the work. A successful
+  // delete therefore records `released` (and the derived `residue`), and so does
+  // a clear of a session that has no files to move.
+  const { service, store } = await releaseFixture(t, { releaseOnArchive: false });
+  const forced = await service.deleteSessions({
+    sessionIds: [SESSION_A],
+    stopActivity: true,
+    force: true,
+    waitForReleaseMs: 120
+  });
+  assert.equal(forced.deleted, 1, JSON.stringify(forced.results));
+
+  const records = await store.readLog();
+  const deleteRecord = records.find((row) => row.op === "delete" && row.outcome === "ok");
+  assert.ok(deleteRecord !== undefined, "a successful delete is audited");
+  assert.equal(deleteRecord.sessionId, SESSION_A);
+  assert.equal(deleteRecord.released, true, "the record says the runtime let the session go");
+  assert.equal(deleteRecord.forced, true, "the record says the caller consented to a forced delete");
+  assert.equal(deleteRecord.residue, false, "a released session leaves no residue");
+
+  // A session the runtime refuses to let go is recorded as exactly that.
+  const stuck = await releaseFixture(t, { releaseOnArchive: false, detachable: false });
+  const refused = await stuck.service.deleteSessions({
+    sessionIds: [SESSION_A],
+    stopActivity: true,
+    force: true,
+    waitForReleaseMs: 120
+  });
+  assert.equal(refused.deleted, 1, JSON.stringify(refused.results));
+  assert.equal(refused.results[0].released, false);
+  assert.equal(refused.results[0].residue, true);
+  const residueRecord = (await stuck.store.readLog()).find((row) => row.op === "delete" && row.residue === true);
+  assert.ok(residueRecord !== undefined, "the residue is audited as such");
+  assert.equal(residueRecord.released, false);
+});
+
+test("R32: a purge that destroyed the bytes survives a failing accounting cleanup", async (t) => {
+  // The defect: the purge loop ran `#clearPurgedAccounting` with no guard, so a
+  // registry getter throwing after the bytes were destroyed turned a finished
+  // purge into a rejected promise — the caller saw a 500 and could "retry" an
+  // irreversible purge. The bytes are gone either way, so the cleanup failure
+  // must be reported, never thrown.
+  const { store, sessionDir, sessionRoot, cwd } = await fixture(t);
+  const { item } = await store.trash({ sourceDir: sessionDir, sessionId: SESSION_A });
+
+  // A registry whose `archivedSessionIds` getter throws is enough to fail the
+  // residue accounting inside `#clearPurgedAccounting` after the bytes are gone.
+  const throwingRegistry = {
+    get archivedSessionIds() {
+      throw new Error("registry probe exploded");
+    },
+    pinnedSessionIds: [],
+    list: () => []
+  };
+  const ctx = fakeCtx({
+    sessionPersistence: fakePersistence({ root: sessionRoot, sessionCwd: new Map([[SESSION_A, cwd]]) }),
+    workspaceRegistry: throwingRegistry,
+    sessions: fakeSessions([]),
+    sessionController: { listState: { list: async () => [] } }
+  });
+  const service = new SessionTrashService(ctx, { store });
+
+  // This is the assertion that fails on the old code: it rejected instead of
+  // reporting the already-finished purge.
+  const outcome = await service.purgeSessions({ trashIds: [item.trashId], acknowledge: true });
+  assert.equal(outcome.purged, 1, JSON.stringify(outcome.results));
+
+  const records = await store.readLog();
+  const accountingFailure = records.find((row) => row.op === "purge" && row.outcome === "accounting-failed");
+  assert.ok(accountingFailure !== undefined, "the accounting cleanup failure is audited");
+  assert.equal(accountingFailure.code, "accounting-error");
+  assert.equal(accountingFailure.sessionId, SESSION_A);
+});
+
+test("R33: purging a session whose files survive out of reach does not clear its bookkeeping", async (t) => {
+  // The defect: `#clearPurgedAccounting` treated every non-`ok` locate as "dead"
+  // and cleared the session's durable bookkeeping. But `resolveSessionDir` only
+  // answers `not-found` when the bytes are definitively gone; `not-visible` (and
+  // `unsafe-location`) mean a copy still exists but is out of reach under the
+  // containment rules — clearing the archive/pin/workspace link of such a session
+  // orphans a row whose files are still on disk. The purge is about destroying
+  // the bin copy; it must not reach past the bin and erase a session the probe
+  // could not vouch for as gone.
+  const { store, sessionDir, sessionRoot, cwd } = await fixture(t);
+  const { item } = await store.trash({ sourceDir: sessionDir, sessionId: SESSION_A });
+
+  // After the trash moved the directory, put a symlink back in its place so the
+  // probe finds the session "present on disk" yet refused by the containment
+  // rules — exactly the `not-visible` refusal the caller used to treat as dead.
+  const target = path.join(sessionRoot, "survivor");
+  await fs.mkdir(target, { recursive: true });
+  await fs.symlink(target, sessionDir);
+
+  const registry = fakeWorkspaceRegistry({
+    archived: [SESSION_A],
+    pinned: [SESSION_A],
+    workspaces: [{ path: cwd, sessionIds: [SESSION_A] }]
+  });
+  const ctx = fakeCtx({
+    sessionPersistence: fakePersistence({ root: sessionRoot, sessionCwd: new Map([[SESSION_A, cwd]]) }),
+    workspaceRegistry: registry,
+    sessions: fakeSessions([]),
+    sessionController: { listState: { list: async () => [] } }
+  });
+  const service = new SessionTrashService(ctx, { store });
+
+  const outcome = await service.purgeSessions({ trashIds: [item.trashId], acknowledge: true });
+  assert.equal(outcome.purged, 1, JSON.stringify(outcome.results));
+
+  // The assertions that fail on the old code: the session's bytes still exist (out
+  // of reach), so none of its durable bookkeeping may be dropped.
+  assert.deepEqual(registry.archivedSessionIds, [SESSION_A], "the archive set is untouched");
+  assert.deepEqual(registry.pinnedSessionIds, [SESSION_A], "the pin set is untouched");
+  const workspace = registry.list()[0];
+  assert.deepEqual(workspace.sessionIds, [SESSION_A], "the workspace link is untouched");
+  assert.equal(
+    registry.calls.some((call) => call.op === "detach" || call.op === "unarchive" || call.op === "unpin"),
+    false,
+    "no accounting cleanup ran for a session that is not provably gone"
+  );
 });
