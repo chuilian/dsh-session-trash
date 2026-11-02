@@ -733,22 +733,21 @@ test("the single-session dialog still shows a residue row it was asked about", a
   }
 });
 
-test("the purge flow refuses to run without the acknowledgement", async () => {
+test("confirming the purge dialog sends the request with no extra acknowledgement step", async () => {
   const { exports } = await loadBundle();
   const { storeInstance, confirmPurge } = exports.__test;
   const calls = [];
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (url) => {
-    calls.push(String(url));
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), body: options.body === undefined ? {} : JSON.parse(options.body) });
     return { status: 200, json: async () => ({ ok: true, value: { results: [], purged: 0, freedBytes: 0 } }) };
   };
   try {
-    storeInstance.actions.setPurge({ trashIds: ["t-1"], count: 1, bytes: 5, acknowledged: false, pending: false, error: null });
+    storeInstance.actions.setPurge({ trashIds: ["t-1"], count: 1, bytes: 5, pending: false, error: null });
     await confirmPurge();
-    assert.deepEqual(calls, [], "no request is sent before the acknowledgement");
-    storeInstance.actions.patchPurge({ acknowledged: true });
-    await confirmPurge();
-    assert.ok(calls.some((url) => url.endsWith("/purge")));
+    const purges = calls.filter((call) => call.url.endsWith("/purge"));
+    assert.equal(purges.length, 1, "the request goes out as soon as the dialog is confirmed");
+    assert.equal(purges[0].body.acknowledge, true, "pressing the button is carried as the consent");
     assert.equal(storeInstance.getSnapshot().purge, null);
   } finally {
     globalThis.fetch = originalFetch;
@@ -1359,7 +1358,6 @@ test("a purge selection longer than one batch is sent in several requests", asyn
       trashIds: ["t-a", "t-b", "t-c"],
       count: 3,
       bytes: 3,
-      acknowledged: true,
       pending: false,
       error: null
     });
@@ -1377,7 +1375,6 @@ test("a purge selection longer than one batch is sent in several requests", asyn
       trashIds: ["*"],
       count: 3,
       bytes: 3,
-      acknowledged: true,
       pending: false,
       error: null
     });

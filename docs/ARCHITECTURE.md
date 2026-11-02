@@ -518,7 +518,7 @@ const storeSeat = { ...storeHandle, create: () => storeInstance };
   dialog: null | { mode:"single"|"batch", sessionIds, titleById, singleTitle,
                    plans, selectedIds, step:1|2, pending, error, root },
   bin:    { status, items, broken, stats, error, selected, log },
-  purge:  null | { trashIds, count, bytes, acknowledged, pending, error },
+  purge:  null | { trashIds, count, bytes, pending, error },
   notice: null | { text, tone, undo:{trashIds} | null }
 }
 ```
@@ -566,7 +566,7 @@ const storeSeat = { ...storeHandle, create: () => storeInstance };
 
 **回收站恢复**：面板选中条目 → 「恢复选中」→ `POST /restore` → 刷新面板与会话列表 → Toast 报告恢复数量。原始路径被占用时该项返回 `occupied`，其余照常，条目保留在回收站。选中条目多于一次请求能带的数量时，按 `maxBatch` **切成多批**提交（与删除路径同一套切批逻辑），而不是整次被 `batch-too-large` 拒绝。
 
-**彻底删除**：面板 → 「彻底删除」/「清空回收站」→ 弹窗需勾选「我了解此操作无法恢复」→ `POST /purge`（带 `acknowledge: true`）→ 释放字节数写入 Toast。UI 未勾选时**根本不发请求**，宿主端即使收到请求也会以 428 拒绝。同样按 `maxBatch` 切批；`["*"]` 哨兵是一个整体，永远只发一次请求。
+**彻底删除**：面板 → 「彻底删除」/「清空回收站」→ 弹窗点「确认彻底删除」即 `POST /purge`（客户端把按钮点击翻译成 `acknowledge: true`，不再有单独的勾选步骤）→ 释放字节数写入 Toast。宿主端仍是权威：请求缺 `acknowledge` 就以 428 拒绝。同样按 `maxBatch` 切批；`["*"]` 哨兵是一个整体，永远只发一次请求。
 
 ### 7.6 样式
 
@@ -729,8 +729,8 @@ realpath（含 macOS `/var`→`/private/var`）的判定正确；包含性、符
 | 客户端构建 | 手写懒 CJS | tsdown 打包 | 零依赖、零构建、可直接审阅 |
 | 客户端 inject | 空数组 + 响应式获取 | 硬声明服务名 | 硬声明若有一项不匹配会导致整页启动失败 |
 | 过期条目 | 只标记，不自动删除 | 自动清理 | 静默销毁用户数据不可接受 |
-| 彻底删除门槛 | UI 勾选 + 宿主 `acknowledge` | 只在前端拦 | 前端可被绕过，宿主必须是权威 |
-| 删除的确认次数 | **单步**（用户明确要求） | 两步确认 | 回收站本身可恢复，因此确认的职责是「讲清后果」而非「多拦一次」；而不可逆的彻底删除仍然保留勾选门槛 |
+| 彻底删除门槛 | 确认按钮即同意 + 宿主 `acknowledge` | 只在前端拦 | 前端可被绕过，宿主必须是权威；用户明确要求去掉多一次的勾选 |
+| 删除的确认次数 | **单步**（用户明确要求） | 两步确认 | 回收站本身可恢复，因此确认的职责是「讲清后果」而非「多拦一次」；而不可逆的彻底删除由确认弹窗本身承担这次「多看一眼」 |
 | 主按钮命名 | 命名**动作**（删除 / 强制删除） | 命名**去向**（移入回收站） | 用户要的是「确认删除」；去向由描述与结果提示说明。这条被要求了两次，因此由测试固定 |
 | 驻留会话的删除 | 释放 → 归档 → 有界等待 → **强制完成** | 直接拒绝 | 拒绝发生在工作已被停止之后，等于让用户既丢工作又删不掉 |
 | 配置 | 文件 + 宽容读取 | schemastery + 设置页 | 换取零运行时依赖 |

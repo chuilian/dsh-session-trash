@@ -307,7 +307,7 @@ test("every registered component renders under real React", async (t) => {
         state: {
           dialog: null,
           bin: { status: "idle", items: [], broken: [], stats: null, error: null, selected: [], log: [] },
-          purge: { trashIds: ["t-20260101T000000Z-deadbeef"], count: 2, bytes: 4096, acknowledged: true, pending: false, error: null },
+          purge: { trashIds: ["t-20260101T000000Z-deadbeef"], count: 2, bytes: 4096, pending: false, error: null },
           notice: null
         }
       });
@@ -518,6 +518,17 @@ test("the rendered markup carries the real content, not an empty shell", async (
   );
   assert.match(unknownMarkup, /dialog\.activityUnknown/, "an unknown activity state needs its own label");
   assert.doesNotMatch(unknownMarkup, /dialog\.activity(?!Unknown)/, "an unknown state must not be shown as work in progress");
+
+  // The purge dialog is the last word: confirming it is the consent. No
+  // acknowledgement checkbox may reappear in front of the destructive action.
+  store.actions.setDialog(null);
+  store.actions.setPurge({ trashIds: ["t-20260101T000000Z-deadbeef"], count: 1, bytes: 2048, pending: false, error: null });
+  const purgeMarkup = server.renderToStaticMarkup(
+    react.createElement(overlay.component, { t: t_, useStore: (selector) => selector(store.getSnapshot()) })
+  );
+  assert.match(purgeMarkup, /dialog\.action\.purgeConfirm/, "the dialog must carry its confirm button");
+  assert.doesNotMatch(purgeMarkup, /type="checkbox"/, "confirming must not require another checkbox");
+  assert.doesNotMatch(purgeMarkup, /dialog\.purge\.ack/, "the acknowledgement copy must be gone");
 });
 
 test("the picker's controls reach the store and the host", async (t) => {
@@ -618,4 +629,13 @@ test("the picker's controls reach the store and the host", async (t) => {
   assert.equal(posted.body.force, false, "a row with no work in progress needs no force");
   assert.equal(store.getSnapshot().dialog, null, "the dialog closes once the host answered");
   assert.deepEqual(store.getSnapshot().notice.undo, { trashIds: ["t-20260101T000000Z-deadbeef"] }, "undo only offers real bin items");
+
+  // The purge dialog must be actionable the moment it opens.
+  store.actions.setDialog(null);
+  store.actions.setPurge({ trashIds: ["t-20260101T000000Z-deadbeef"], count: 1, bytes: 2048, pending: false, error: null });
+  render();
+  const purgeConfirm = control("Button", (props) => props.children === "dialog.action.purgeConfirm");
+  assert.ok(purgeConfirm, "the purge dialog must carry its confirm button");
+  assert.notEqual(purgeConfirm.props.disabled, true, "confirming must not wait for another step");
+  assert.equal(control("Checkbox", (props) => props.label === "dialog.purge.ack"), undefined, "no acknowledgement checkbox may come back");
 });
