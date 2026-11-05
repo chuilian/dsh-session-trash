@@ -1389,3 +1389,126 @@ test("a purge selection longer than one batch is sent in several requests", asyn
     storeInstance.actions.patchBin({ maxBatch: 100 });
   }
 });
+
+test("a restore drops the tombstone the delete left behind and reopens the session", async () => {
+  // The defect: deleting the session on screen kept its client-side instance,
+  // flagged `removed` and with a closed event stream. The restore announced the
+  // session again but reused that instance, so every message went into a dead
+  // stream and nothing came back — no error, no reply.
+  const { exports } = await loadBundle();
+  const { storeInstance, confirmDelete, restoreSelected, setContext } = exports.__test;
+  const originalFetch = globalThis.fetch;
+  const dropped = [];
+  const reopened = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const body = options.body === undefined ? {} : JSON.parse(options.body);
+    const respond = (value) => ({ status: 200, json: async () => ({ ok: true, value }) });
+    if (String(url).endsWith("/delete")) {
+      return respond({ results: [{ sessionId: "open", ok: true, trashId: "t-1" }], deleted: 1, failed: 0 });
+    }
+    if (String(url).endsWith("/restore")) {
+      return respond({
+        results: body.trashIds.map((trashId) => ({ trashId, ok: true, sessionId: "open", revived: true })),
+        restored: body.trashIds.length,
+        failed: 0
+      });
+    }
+    return respond({});
+  };
+  try {
+    // The delete leaves the instance of the session on screen behind as a
+    // tombstone; that is what the restore has to clear.
+    const tombstone = { removed: true };
+    const ctx = {
+      get: (name) => {
+        if (name === "sessions") {
+          return {
+            list: {
+              getSnapshot: () => ({
+                ids: ["open", "survivor"],
+                byId: {
+                  open: { id: "open", displayTitle: "Open", blank: false },
+                  survivor: { id: "survivor", displayTitle: "Survivor", blank: false }
+                }
+              })
+            },
+            manager: {
+              sessions: new Map([["open", tombstone]]),
+              drop: async (sessionId) => dropped.push(sessionId)
+            },
+            scopes: new Map(),
+            refresh: async () => {}
+          };
+        }
+        if (name === "uiWorkspace") {
+          return {
+            mainReference: { sessionId: "open" },
+            openSession: (id) => reopened.push(id),
+            clearMain: () => {}
+          };
+        }
+        return undefined;
+      }
+    };
+    setContext(ctx);
+    storeInstance.actions.setDialog({
+      mode: "single",
+      sessionIds: ["open"],
+      titleById: { open: "Open" },
+      singleTitle: "Open",
+      plans: [{ sessionId: "open", deletable: true, bytes: 1, resident: true, activity: [{ kind: "turn" }] }],
+      selectedIds: ["open"],
+      pending: false,
+      error: null,
+      root: "/tmp/bin"
+    });
+    await confirmDelete();
+    reopened.length = 0;
+
+    await restoreSelected(["t-1"]);
+    assert.deepEqual(dropped, ["open"], "the tombstone instance is dropped instead of being reused");
+    assert.deepEqual(reopened, ["open"], "the session that was on screen is opened again");
+  } finally {
+    globalThis.fetch = originalFetch;
+    storeInstance.actions.setDialog(null);
+    storeInstance.actions.setNotice(null);
+  }
+});
+
+test("a restore that could not re-attach the session says so", async () => {
+  const { exports } = await loadBundle();
+  const { storeInstance, restoreSelected, setTranslator } = exports.__test;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const body = options.body === undefined ? {} : JSON.parse(options.body);
+    const respond = (value) => ({ status: 200, json: async () => ({ ok: true, value }) });
+    if (String(url).endsWith("/restore")) {
+      return respond({
+        results: body.trashIds.map((trashId) => ({
+          trashId,
+          ok: true,
+          sessionId: "open",
+          revived: false,
+          reviveCode: "resume-failed",
+          reviveMessage: "no agent for you"
+        })),
+        restored: body.trashIds.length,
+        failed: 0
+      });
+    }
+    return respond({});
+  };
+  try {
+    // The locale's own binding shape: the key plus the parameters it was given.
+    setTranslator((key, params) => (params === undefined ? key : `${key}:${JSON.stringify(params)}`));
+    await restoreSelected(["t-1"]);
+    const notice = storeInstance.getSnapshot().notice;
+    assert.equal(notice.tone, "warning");
+    assert.match(notice.text, /notice\.restoreNotLive/);
+    assert.match(notice.text, /no agent for you/, "the reason the session stayed dead is in the notice");
+  } finally {
+    setTranslator((key) => key);
+    globalThis.fetch = originalFetch;
+    storeInstance.actions.setNotice(null);
+  }
+});

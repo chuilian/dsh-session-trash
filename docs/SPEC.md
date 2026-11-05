@@ -123,6 +123,8 @@ DSH 侧栏的「会话设置」菜单（截图中的右键/更多菜单）当前
 - **FR-4.6** 侧栏的「更多」菜单里新增「回收站」一行（`sidebar.panellist.actions` 槽位，id = `session-trash.more`，order = −20；宿主按 `order` 升序渲染菜单行，内置两行为 0），并保留主面板页（`main` 槽位，key = `session-trash`）。侧栏不再常驻「回收站」行。
 - **FR-4.7** 面板提供：条目列表（标题、删除时间、大小、原工作区、超期标记）、多选、恢复选中、彻底删除选中、刷新、操作日志折叠区、空状态。选中的条目多于单次请求能带的数量时，**按 `maxBatch` 分批提交**（与删除路径同一套逻辑），不整次撞上 `batch-too-large`。
 - **FR-4.8** 损坏条目单独归类提示，数量可见，不混入可恢复列表：manifest 损坏（`corrupt`）、payload 缺失（`failed`）、**无 manifest 的孤儿目录**（`orphan`，例如在 `mkdir` 与写 manifest 之间崩溃）、以及 **manifest 能解析但状态是本版本不认识的**（`unknown-state`，例如另一个版本写的条目）。孤儿与未知状态过去的字节既看不见也删不掉，现在会在列表里报告并可被彻底删除。
+- **FR-4.9** 恢复不只是把文件搬回去，还要把会话**挂回运行时**：文件与记账就位之后、通知客户端之前，调用宿主的 `sessionController.resolveAgent(sessionId)` 触发 `resolve → resume`（`#reviveSession`，超时 `reviveTimeoutMs` 默认 8000ms）。仍驻留的会话记 `already-live`，不重复 resume；宿主没有该接口记 `no-resume-api`。复活失败**不**把恢复判成失败（文件与记账已经就位），但必须在结果行里如实反映：`revived: false` 加 `reviveCode`（`resume-failed` / `no-resume-api`）与 `reviveMessage`，界面据此提示「文件已恢复，但没有重新挂载到运行时（原因）：重启 DSH 后即可继续对话」。
+- **FR-4.10** 客户端在恢复后**丢弃陈旧实例**：删除时留下的会话实例带着 `removed` 标记（`handleRemoved()` 只打标记、不销毁，`handleSessionAdded()` 也不清它），恢复后不得复用——`removed === true` 的走 `sessions.retireScope(id, scope)`，否则走 `sessions.manager.drop(id, instance)`，由下一次打开重新懒建；并且当被恢复的会话正是删除前 main view 上那一个时，恢复后重新打开它。
 
 ### FR-5 彻底删除（不可恢复）✅ 已实现
 
@@ -139,7 +141,7 @@ DSH 侧栏的「会话设置」菜单（截图中的右键/更多菜单）当前
 
 ### FR-7 审计日志 ✅ 已实现
 
-- **FR-7.1** 所有变更（`trash` / `restore` / `purge`）与所有拒绝（`delete` + `refused` + 原因码）写入 `<trashRoot>/logs/trash-<YYYY-MM-DD>.ndjson`，每行一条 JSON，追加写。
+- **FR-7.1** 所有变更（`trash` / `restore` / `restore-revive` / `purge`）与所有拒绝（`delete` + `refused` + 原因码）写入 `<trashRoot>/logs/trash-<YYYY-MM-DD>.ndjson`，每行一条 JSON，追加写。`restore-revive` 记录 `outcome`（`ok` / `failed`）与原因码（`resumed` / `already-live` / `no-resume-api` / `resume-failed`），失败时的 `message` 也一并落盘。
 - **FR-7.2** 每条记录包含：`ts`、`tsIso`、`pid`、`host`（主机名哈希，不落明文）、`op`、`outcome`、`sessionId`、`trashId`、`originalPath`、字节数、`actor`。
 - **FR-7.3** 日志写失败只告警，不让业务操作失败（日志是证据，不是前提）。
 - **FR-7.4** 面板内可查看最近 50 条；`GET /session-trash/log?limit=N` 可取更多。
@@ -262,6 +264,9 @@ DSH 侧栏的「会话设置」菜单（截图中的右键/更多菜单）当前
 | AC-26 | 审计日志的读取有上限，`limit=0` 精确返回空 | 回归测试 R29 + 路由用例 |
 | AC-27 | 重复告警的去重集合有上限，不会随宿主进程寿命无限增长 | 回归测试 R30 |
 | AC-28 | **批量列表不出现已删除/已归档的会话**；单会话对话框仍显示被点名的残留行 | 客户端测试 `the batch picker drops rows the user can no longer act on`、`the batch dialog never lists a session that is already deleted or archived`、`the single-session dialog still shows a residue row it was asked about` |
+| AC-29 | **恢复后会话能立刻继续对话**：恢复向宿主请求 resume 该会话；仍驻留的不重复 resume；宿主没有该接口时如实标记 | `tests/host/restore-revive.test.js`（6 例：resumed / already-live / no-resume-api / resume-failed / 超时不阻塞 / 审计 `op=restore-revive`） |
+| AC-30 | **复活失败不把恢复报成失败**，且界面把「文件回来了但没活过来」讲清楚 | 同上（`ok: true` 加 `revived: false` 与原因）+ 客户端测试 `a restore that could not re-attach the session says so`（tone=warning、文案含原因） |
+| AC-31 | 恢复后不使用删除时留下的陈旧实例，并把原来那一页重新打开 | 客户端测试 `a restore drops the tombstone the delete left behind and reopens the session` |
 | AC-13 | 原有四项功能不受影响 | 未触碰其注册代码；人工回归 |
 
 ---

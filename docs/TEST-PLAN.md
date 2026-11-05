@@ -124,6 +124,20 @@
 | 19 | 删除不存在的会话 | `not-found`，registry 无调用，回收站为空 |
 | 20 | 无持久化服务时的降级 | `canDelete: false`；删除请求 `not-found` |
 
+### 2.3b `tests/host/restore-revive.test.js`（6）
+
+恢复把文件搬回来之后必须把会话**挂回运行时**（§5.6）。这 6 例都带自己的假 `sessionController`，
+并用 `reviveTimeoutMs` 把超时压到毫秒级：
+
+| # | 用例 | 断言要点 |
+|---|---|---|
+| 1 | **恢复会请求 resume** | `resolveAgent` 恰被以恢复的 `sessionId` 调用一次；结果行 `revived: true`、`reviveCode: "resumed"` |
+| 2 | **resume 失败仍算恢复成功** | `ok: true` 加 `revived: false`、`reviveCode: "resume-failed"`、`reviveMessage` 带原因；文件已回位 |
+| 3 | **resume 永不 settle 不拖住恢复** | `reviveTimeoutMs: 10`；恢复在预算内返回，`resume-failed`，且超时后的拒绝不会变成未处理拒绝 |
+| 4 | **仍驻留的会话不重复 resume** | 注册表命中 → `resolveAgent` 调用 0 次；`reviveCode: "already-live"` |
+| 5 | **宿主没有 resume 接口时降级** | `reviveCode: "no-resume-api"`；文件照常恢复、`ok: true` |
+| 6 | **复活的成败写审计** | 一条 `op: "restore-revive"`，`outcome` 与原因码正确，含 `trashId`/`sessionId`/`actor` |
+
 ### 2.4 `tests/host/locate.test.js`（16）
 
 | # | 用例 | 断言要点 |
@@ -192,6 +206,8 @@
 | 23 | **批量对话框不再列出已删除/已归档会话** | 宿主预检返回三者时，`plans` 与 `sessionIds` 只剩可删的那一个 |
 | 24 | **单会话对话框仍显示被点名的残留行** | 批量规则不得吞掉单会话入口 |
 | 25 | **对话框说明「删除当前会话会结束这段对话」** | `dialog.current`（中英文）与 `dialog.currentTag` |
+| 26 | **恢复丢弃删除留下的 tombstone 实例并重开原页** | 删除时开着的会话留下的实例（`removed === true`）在恢复时被 `retireScope`/`drop` 掉；恢复结果包含它时 `uiWorkspace.openSession` 被调用 |
+| 27 | **复活失败时提示条降级成警告并说明原因** | `revived === false` → `tone: "warning"`，文案含 `notice.restoreNotLive` 与原因 |
 
 ### 2.7 `tests/host/regressions.test.js`（17）
 
@@ -564,3 +580,27 @@ const toggle = (sessionId) => {
 越会撞上「无法操作」。护栏应该限制**一个请求的代价**，而不是限制**用户能选多少**：客户端负责把用户的意图切给护栏能接受的形状。
 第二，**批次里的失败必须逐项成文**：只要有一个 id 让整个 Promise reject，前面所有成功的动作就失去了凭据（`trashId`），
 这比失败本身更危险。
+
+### 5.12 第五次用户实测缺陷：恢复之后，文件回来了但没有活过来
+
+用户删除「数据库迁移方案评审」后又手动恢复，接着在里面发消息——气泡留着，没有任何回应，也不报错。
+
+取证全是只读的：回收站日志显示 `trash … forced=true` 之后 39 秒 `restore … ok`；而该会话目录当天
+**零写入**（日志末行停在前一天 22:17 的 `model/selection`），同工作区其它会话在同一时段正常落盘；
+`lsof` 显示它的 `session.lock` 没有任何进程持有，而同时其它 13 个活会话的锁都在宿主 PID 上。
+
+三个层面叠在一起，所以过去的测试一条都没抓到：
+
+1. **服务层**：强制删除会主动把会话从运行时拿下（`detach()`），恢复却只搬文件、还原记账、通知客户端。
+   文件回来了、活体没有。假上下文里从来没有「恢复完还得能对话」这条契约。
+2. **宿主解析**：活的会话只能由 `resolve → resume` 建出来，而恢复路径里没人发起它。这是 DSH 的行为，
+   不是插件的 bug——但插件不能指望它自己发生。
+3. **客户端**：`handleRemoved()` 只给旧实例打 `removed = true`（不销毁），`api-session/added` 也不清
+   这个标记，而 `prompt()` 不看它；失败又只在 `{ok: false}` 时显示错误条——用户看到的就是「发出去了，
+   什么都没发生」。
+
+修法与三条设计决定见 `docs/ARCHITECTURE.md` §5.6；回归测试见 §2.3b（6 例）与 §2.6 的第 26、27 条。
+
+**教训**：恢复的验收标准不能止于「文件字节一致」。**用户对恢复的期望是「能接着聊」**——把「文件回位」
+当成恢复完成的定义，就把一个会静默失败的中间态留在了用户面前。另外，任何「失败也要如实说出来」的
+路径都要检查**客户端有没有把它显示出来**：插件这边报了 `revived: false`，客户端不显示就等于没说。

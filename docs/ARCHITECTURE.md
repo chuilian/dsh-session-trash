@@ -260,6 +260,11 @@ async function acceptableDir(root, dir) {
 「点了恢复却什么都没有」的条目。因此清理失败时只记一条 warn，并把清单就地改成 `state: "restored"`
 （尽力而为：清单本身也可能写不下去，那就只留日志），返回仍然报告成功、`move.leftover = true`。
 
+到这里只完成了**文件层面**的恢复：磁盘上又有这个会话了，但宿主并不持有它的活体——删除时
+`#releaseResidentSession` 已经把活会话从运行时拿下（§5.2 ④），而磁盘上的冷会话只有在下一次
+`resolve → resume` 时才会重新变成「能对话的会话」。谁也不会替用户发起那次 resume，所以恢复必须
+自己把它做完，见 §5.6。
+
 ### 4.4 原子且持久的写入
 
 ```js
@@ -383,6 +388,9 @@ DSH 的宿主在客户端打开一个会话的事件流时，会把这个**冷�
 
 - 删除后 `ctx.emit("api-session/removed", id)`：所有已连接客户端把该行从列表移除（这是会话控制器自己在 `session/disposed` 时用的同一个事件）。
 - 恢复后 `ctx.emit("api-session/added", summary)`：summary 取自 `ctx.sessionController.listState.list()`，即 DSH 自己的列表构造器，不自行拼装。
+- 恢复的顺序是「文件回位 → 记账回位 → **复活** → 通知」：`api-session/added` 只在复活尝试**之后**发出。
+  反过来（先通知再复活）会让客户端先拿到一行、隔一个不确定的时长才变得可对话，而这段时间里用户发出的
+  提示会落进一个没有活体的会话里——这正是 §5.6 要修的那个故障的可见形态。
 - 调用方自己的客户端还会额外 `ctx.sessions.refreshList()`，因为 emit 是尽力而为，不应作为唯一依赖。
 
 ### 5.4 串行化与批次隔离
@@ -406,7 +414,48 @@ DSH 的宿主在客户端打开一个会话的事件流时，会把这个**冷�
 恢复出的会话在工作区内的**精确次序**不还原：DSH 的会话显示次序是浏览器本地的，删除移走的是
 「成员资格」这一持久事实，恢复也只承诺把成员资格还回来。
 
-### 5.6 预检（`plan`）的成本：并发做，别做没人看的事
+### 5.6 恢复即复活：文件回来不算回来
+
+`#restoreOne` 在 `#restoreAccounting` 之后、`#emitAdded` 之前调用 `#reviveSession(sessionId)`：
+
+```
+1. 活体注册表里已经有它（ctx.sessions.get(id) 有值）→ already-live，不重复 resume
+2. 宿主没有 sessionController.resolveAgent → no-resume-api（降级，不假装成功）
+3. await Promise.race([ resolveAgent(id), 超时 ])，超时 = reviveTimeoutMs（默认 8000ms）
+4. 返回 {agent} → resumed；{error} / 抛错 / 超时 → resume-failed + message
+5. 每条分支都写审计（op: "restore-revive"），并把 revived / reviveCode / reviveMessage 带回结果行
+```
+
+三条设计决定：
+
+- **复活失败不把恢复判成失败。** 文件已经回原位、记账也已经回位，把整次恢复报成失败会让用户以为
+  会话丢了，还会把一个「重启就能救回来」的会话报成「恢复失败」。所以 `ok` 仍为 `true`，另用
+  `revived: false` + `reviveCode` / `reviveMessage` 如实说明，客户端据此把提示降级成警告：
+  「文件已恢复，但没有重新挂载到运行时（原因）：重启 DSH 后即可继续对话」。
+- **复活必须有超时。** resume 要走 `sessionQuery.observeSession` → `agents.resume`，读盘、建 agent；
+  一个卡住的 resume 不允许把恢复请求一起挂住——`SerialQueue` 是串行的，挂住就等于所有人的删除/
+  恢复/彻底删除一起挂住。超时之后那个 promise 仍然挂着 `.catch(() => {})`，免得它在很久以后变成
+  未处理的拒绝。
+- **驻留判定问注册表本身，不用 `isResident()`。** `isResident` 是 **fail-closed** 的：探测本身失败时
+  按「可能驻留」返回 `true`——这对删除路径是对的（宁可拒绝也不误删），但在这里会把「注册表读不到」
+  翻译成「会话还活着」，于是**跳过**复活，恢复又退回沉默的僵尸行。所以 `#reviveSession` 直接读
+  `ctx.sessions.get(id)`，读不到就照常去 resume：宿主对活会话的 `resolveAgent` 是空操作
+  （`resolve()` 先查 `liveAgent()`，命中即返回，不触发 resume），多叫一次没有代价。
+
+客户端侧配套（`lib/client.js`）：
+
+- **丢弃陈旧实例**（`releaseStaleSession`）：删除时客户端把该会话的 scope 退休了
+  （`releaseClientScopes`），但 `api-session/removed` 的处理只给实例打 `removed = true` 标记、**不销毁**
+  它（`handleRemoved()` 的注释就是「flag the snapshot while retaining the resident instance」），而
+  `api-session/added` 也**不清**这个标记。于是恢复后重新打开时可能复用一个带着删除标记的实例，而
+  `prompt()` 根本不看这个标记——失败还是静默的（`prompt()` 只在 `{ok: false}` 时退役回显并设
+  `promptError`，抛异常时连错误条都没有，用户看到的正是「消息发出去了，什么都没发生」）。所以恢复时
+  主动丢弃：`removed === true` 的走 `sessions.retireScope(id, scope)`，其余走 `sessions.manager.drop(id,
+  instance)`，由下一次打开重新懒建。
+- **重开原来那一页**：删除时模块态记下当时 main view 上的会话 id（`currentMainSessionId()`）；恢复结果
+  里包含它就 `uiWorkspace.openSession(id)` 重新打开——用户回到的是「刚才那个会话」，不是回收站面板。
+
+### 5.7 预检（`plan`）的成本：并发做，别做没人看的事
 
 预检是唯一一个「一次要问很多会话」的只读动作，它的耗时必须与用户选中的行数无关地保持在几十毫秒量级：
 
@@ -698,7 +747,31 @@ CSS 全部使用 DSH 自己的设计令牌（`--dsw-alias-label-primary`、`--ds
 三个服务名与上游 `super(ctx, '<name>')` 一致；`archivedSessionIds` 是数组（`.includes` 可用），
 `list()` 返回的实体带 `path` 与 `sessionIds`（`attachSession` 的用法成立）。
 
-### 5.10 客户端三层测试各自负责什么
+### 9.3 第五次用户实测：恢复后的会话「点了没反应」
+
+用户把「数据库迁移方案评审」这个会话**删除、又立刻手动恢复**，之后在里面发消息：气泡发出去了，
+界面没有任何回应，也没有报错。
+
+取证（全程只读）：
+
+- 回收站日志：`trash … forced=true released=true` → 39 秒后 `restore … ok`，`actor: session-menu`。
+- 该会话目录 `~/.dsh/sessions/--Users-…-project-alpha--/session-78dfc5b9-…/` 当天**零写入**；日志末行停在
+  前一天 22:17 的 `model/selection`（seq 982）。同工作区其它会话在同一时段正常落盘，同一条提示词在
+  别的会话里得到正常回应——不是模型、不是提示词，也不是宿主进程坏了。
+- `lsof` 显示该会话的 `session.lock` 与日志**没有任何进程持有**，而同时其它 13 个活会话的锁都握在
+  宿主 PID 上。也就是说：它不在运行时里。
+
+根因是**删除与恢复不对称**：强制删除把活会话从运行时拿下（`#releaseResidentSession` → `detach()`，
+DSH 唯一可用的按 id 释放手段），而恢复只做「文件 rename 回原位 + 记账回位 + 通知客户端」。文件回来了，
+活体没有；而 DSH 的活体只能由 `resolve → resume` 建出来，恢复路径里没人发起它。客户端再叠一层：旧
+实例带着 `removed` 标记继续存在，`prompt()` 不看这个标记，失败又是静默的（只在 `{ok:false}` 时显示
+错误条）。于是用户看到的是「消息发出去了，什么都没发生」。
+
+修法与三条设计决定的理由写在 §5.6；回归测试 `tests/host/restore-revive.test.js`（6 例）加客户端 2 例。
+**不可逆的部分**：这次故障发生在修复之前，该会话的恢复动作已经做完——唯一的解法是重启 DSH，让宿主
+在启动时重新扫描会话目录。修复只保证**下一次**恢复不再出现这个问题。
+
+### 9.4 客户端三层测试各自负责什么
 
 | 层 | 能发现 | 发现不了 |
 |---|---|---|
