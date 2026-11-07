@@ -1,0 +1,14 @@
+# 仓库内容一律以 LF 存储与检出。
+# Git for Windows 的 core.autocrlf=true 默认会把 LF 转成 CRLF,
+# 导致 Windows 与 macOS 两边的工作副本字节不一致,提交时产生整仓 diff。
+# 本仓库在两台机器上都要开发(Windows 负责适配,macOS 负责发布),行尾必须统一。
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
