@@ -427,6 +427,162 @@ test("pure helpers: consent and activity flattening", async () => {
   assert.equal(exports.__test.dictionaries.en["dialog.activityUnknown"], "Cannot confirm whether work is still in progress");
 });
 
+test("pure helpers: the consent tag names the reason that actually applies", async () => {
+  // The live report: a conversation that had long finished still carried the
+  // label 「仍有进行中的工作」, because the runtime merely holding it was
+  // reported with the same label as work under way.
+  const { exports } = await loadBundle();
+  const { consentTag } = exports.__test;
+
+  // Work under way: the original label, and it is the only one.
+  const busy = { sessionId: "busy", resident: true, activityKnown: true, activity: [{ kind: "turn", items: [{ id: "1" }] }] };
+  assert.deepEqual(consentTag(busy), { key: "dialog.activity", tone: "warning" });
+
+  // A scheduled delivery aimed at the session is not work under way: it has its
+  // own label, and it says how many tasks are aimed at the session.
+  const scheduled = {
+    sessionId: "scheduled",
+    resident: false,
+    activityKnown: true,
+    activity: [{ kind: "schedule", items: [{ id: "s1" }, { id: "s2" }] }]
+  };
+  assert.deepEqual(consentTag(scheduled), { key: "dialog.scheduled", tone: "warning", params: { count: 2 } });
+
+  // The runtime merely holding an idle session: 「运行时仍持有」, not 「工作进行中」.
+  const held = { sessionId: "held", resident: true, activityKnown: true, activity: [] };
+  assert.deepEqual(consentTag(held), { key: "dialog.resident", tone: null });
+
+  // A quiet session needs no label at all.
+  assert.equal(consentTag({ sessionId: "quiet", resident: false, activityKnown: true, activity: [] }), null);
+
+  // An unknown work state says so, and does not claim that work is in progress.
+  const unknown = { sessionId: "unknown", resident: false, activityKnown: false };
+  assert.deepEqual(consentTag(unknown), { key: "dialog.activityUnknown", tone: "warning" });
+
+  // A scheduled task aimed at a session the runtime still holds is described by
+  // the scheduled delivery: that is the reason the user has to act.
+  const both = {
+    sessionId: "both",
+    resident: true,
+    activityKnown: true,
+    activity: [{ kind: "schedule", items: [{ id: "s1" }] }]
+  };
+  assert.deepEqual(consentTag(both), { key: "dialog.scheduled", tone: "warning", params: { count: 1 } });
+});
+
+test("pure helpers: the selection summary counts each reason separately", async () => {
+  const { exports } = await loadBundle();
+  const { summarizeSelection } = exports.__test;
+  const plans = [
+    // Work under way.
+    { sessionId: "busy", deletable: true, resident: true, activityKnown: true, activity: [{ kind: "turn" }] },
+    // Held by the runtime, nothing running.
+    { sessionId: "held", deletable: true, resident: true, activityKnown: true, activity: [] },
+    // Two scheduled tasks aimed at it.
+    {
+      sessionId: "scheduled",
+      deletable: true,
+      resident: false,
+      activityKnown: true,
+      activity: [{ kind: "schedule", items: [{ id: "s1" }, { id: "s2" }] }]
+    },
+    // Work state could not be confirmed.
+    { sessionId: "unknown", deletable: true, resident: false, activityKnown: false },
+    // Quiet: no consent, no label.
+    { sessionId: "quiet", deletable: true, resident: false, activityKnown: true, activity: [] }
+  ];
+  const summary = summarizeSelection(plans, ["busy", "held", "scheduled", "unknown", "quiet"]);
+  assert.equal(summary.liveWorkCount, 1, "only the session with work under way counts as busy");
+  assert.equal(summary.residentIdleCount, 1, "the held session is idle as far as work goes");
+  assert.equal(summary.scheduledSessionCount, 1, "one session has scheduled tasks aimed at it");
+  assert.equal(summary.scheduledDeliveryCount, 2, "two scheduled tasks in total");
+  assert.equal(summary.unknownActivityCount, 1);
+  // The consent itself still covers every one of them: the count that decides
+  // the force-delete button is unchanged.
+  assert.equal(summary.consentCount, 4);
+});
+
+test("the consent copy exists in both languages and names each reason", async () => {
+  const { exports } = await loadBundle();
+  const { zh, en } = exports.__test.dictionaries;
+  for (const key of [
+    "dialog.consentWork",
+    "dialog.consentScheduled",
+    "dialog.consentResident",
+    "dialog.consentUnknown",
+    "dialog.scheduled",
+    "dialog.resident"
+  ]) {
+    assert.ok(typeof zh[key] === "string" && zh[key] !== "", `zh is missing ${key}`);
+    assert.ok(typeof en[key] === "string" && en[key] !== "", `en is missing ${key}`);
+  }
+  // The resident reason must not tell the user their work will be stopped: for
+  // these sessions nothing is running, they are only held open.
+  assert.ok(!/停止这些工作/.test(zh["dialog.consentResident"]), "a held session has no work to stop");
+  assert.ok(/运行时/.test(zh["dialog.consentResident"]), "the resident reason names the runtime");
+  assert.ok(/定时任务/.test(zh["dialog.consentScheduled"]), "the scheduled reason names the scheduled tasks");
+  // The old single-reason key is gone: it claimed every consented session was
+  // busy.
+  assert.equal(zh["dialog.consent"], undefined);
+  assert.equal(en["dialog.consent"], undefined);
+});
+
+test("the row shows the reason that applies, not a blanket \"work in progress\"", async () => {
+  // The label is what the user reads before deciding to force the delete, so the
+  // rendered tree has to carry the real reason — a finished conversation that
+  // the runtime merely holds must not say its work is still running.
+  const { exports } = await loadBundle();
+  const { DeletePickStep, storeInstance, dictionaries } = exports.__test;
+  const t = (key, params) => {
+    const template = dictionaries.zh[key] ?? key;
+    return params === undefined ? template : template.replace(/\{(\w+)\}/g, (_m, name) => String(params[name] ?? ""));
+  };
+  const plans = [
+    { sessionId: "busy", cwd: "/w", deletable: true, exists: true, resident: true, activityKnown: true, activity: [{ kind: "turn" }] },
+    { sessionId: "held", cwd: "/w", deletable: true, exists: true, resident: true, activityKnown: true, activity: [] },
+    {
+      sessionId: "scheduled",
+      cwd: "/w",
+      deletable: true,
+      exists: true,
+      resident: false,
+      activityKnown: true,
+      activity: [{ kind: "schedule", items: [{ id: "s1" }] }]
+    }
+  ];
+  storeInstance.actions.setDialog({
+    mode: "batch",
+    plans,
+    selectedIds: [],
+    titleById: { busy: "忙", held: "闲", scheduled: "定时" },
+    collapsedGroups: []
+  });
+
+  /** Every element in the tree, depth first. */
+  const walk = (node, out = []) => {
+    if (node === null || node === undefined) return out;
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child, out);
+      return out;
+    }
+    if (typeof node !== "object") return out;
+    out.push(node);
+    walk(node.children, out);
+    return out;
+  };
+
+  const tree = walk(DeletePickStep({ dialog: storeInstance.getSnapshot().dialog, t }));
+  const texts = [];
+  for (const node of tree) {
+    for (const child of node.children ?? []) {
+      if (typeof child === "string") texts.push(child);
+    }
+  }
+  assert.ok(texts.includes("仍有进行中的工作"), "the busy session says work is in progress");
+  assert.ok(texts.includes("运行时仍持有"), "the merely held session says the runtime holds it");
+  assert.ok(texts.includes("1 个定时任务会投递到此会话"), "the scheduled session names its scheduled task");
+});
+
 test("pure helpers: selection summary carries real sizes", async () => {
   const { exports } = await loadBundle();
   const { summarizeSelection, canAdvance } = exports.__test;
@@ -950,7 +1106,11 @@ test("the confirm button says 删除, not 移入回收站", async () => {
   // the result's wording.
   assert.match(zh["dialog.desc.single"], /回收站/);
   assert.match(zh["dialog.desc.batch"], /回收站/);
-  assert.match(zh["dialog.consent"], /强制删除/);
+  assert.match(zh["dialog.consentWork"], /强制删除/);
+  // Each reason the consent covers gets its own sentence: a session the
+  // runtime merely holds is not told that its work will be stopped.
+  assert.match(zh["dialog.consentResident"], /运行时/);
+  assert.match(zh["dialog.consentScheduled"], /定时任务/);
   assert.equal(zh["notice.trashed"], "会话已删除");
   assert.match(zh["notice.trashedMany"], /已删除/);
   // No locale may keep the old two-step wording.
@@ -970,7 +1130,7 @@ test("the rendered dialog offers exactly one destructive action", async () => {
     return params === undefined ? template : template.replace(/\{(\w+)\}/g, (_m, name) => String(params[name] ?? ""));
   };
   assert.equal(t("dialog.action.delete"), "删除");
-  assert.match(t("dialog.consent", { count: 2 }), /强制删除/);
+  assert.match(t("dialog.consentWork", { count: 2 }), /强制删除/);
   assert.equal(t("notice.trashed"), "会话已删除");
   assert.equal(typeof storeInstance.getSnapshot, "function");
 });
@@ -1511,4 +1671,136 @@ test("a restore that could not re-attach the session says so", async () => {
     globalThis.fetch = originalFetch;
     storeInstance.actions.setNotice(null);
   }
+});
+
+test("pure helpers: the batch rows are partitioned by the workspace they belong to", async () => {
+  const { exports } = await loadBundle();
+  const { partitionPlans, workspaceKey, workspaceName } = exports.__test;
+  const plans = [
+    { sessionId: "a", cwd: "/Users/example/Desktop/work/project-alpha" },
+    { sessionId: "b", cwd: "/Users/example/Desktop/work/project-beta" },
+    { sessionId: "c", cwd: "/Users/example/Desktop/work/project-alpha" },
+    // A trailing slash must not turn one directory into two partitions.
+    { sessionId: "d", cwd: "/Users/example/Desktop/work/project-alpha/" },
+    // No workspace at all: one shared partition, not one per row.
+    { sessionId: "e" }
+  ];
+  const groups = partitionPlans(plans);
+  assert.deepEqual(
+    groups.map((group) => group.path),
+    ["/Users/example/Desktop/work/project-alpha", "/Users/example/Desktop/work/project-beta", null],
+    "the partitions are the workspaces, and the rows without one share a partition"
+  );
+  assert.deepEqual(
+    groups.map((group) => group.rows.map((row) => row.sessionId)),
+    [["a", "c", "d"], ["b"], ["e"]],
+    "the rows keep the order they arrived in"
+  );
+  assert.equal(workspaceKey("/a/b/"), "/a/b");
+  assert.equal(workspaceKey("   "), "");
+  assert.equal(workspaceName("/a/b/project-alpha"), "project-alpha");
+  assert.equal(workspaceName(""), null);
+  assert.deepEqual(partitionPlans(undefined), []);
+});
+
+test("pure helpers: a partition remembers whether it is folded away", async () => {
+  const { exports } = await loadBundle();
+  const { toggleCollapsed } = exports.__test;
+  assert.deepEqual(toggleCollapsed([], "/a"), ["/a"]);
+  assert.deepEqual(toggleCollapsed(["/a", "/b"], "/a"), ["/b"], "only that partition is unfolded again");
+  assert.deepEqual(toggleCollapsed(undefined, "/a"), ["/a"]);
+});
+
+test("pure helpers: a partition reports how much of it is selected", async () => {
+  const { exports } = await loadBundle();
+  const { groupSelection } = exports.__test;
+  const rows = [{ sessionId: "a" }, { sessionId: "b" }, { sessionId: "c" }];
+  assert.deepEqual(groupSelection(rows, []), { total: 3, picked: 0, all: false, none: true });
+  assert.deepEqual(groupSelection(rows, ["a"]), { total: 3, picked: 1, all: false, none: false });
+  assert.deepEqual(groupSelection(rows, ["a", "b", "c"]), { total: 3, picked: 3, all: true, none: false });
+  // An empty partition is never "all selected": it has nothing to select.
+  assert.deepEqual(groupSelection([], []), { total: 0, picked: 0, all: false, none: true });
+});
+
+test("the partition copy exists in both languages", async () => {
+  const { exports } = await loadBundle();
+  const { zh, en } = exports.__test.dictionaries;
+  for (const key of [
+    "dialog.groupCount",
+    "dialog.groupSelected",
+    "dialog.expandAll",
+    "dialog.collapseAll",
+    "dialog.groupExpand",
+    "dialog.groupCollapse"
+  ]) {
+    assert.ok(typeof zh[key] === "string" && zh[key] !== "", `zh is missing ${key}`);
+    assert.ok(typeof en[key] === "string" && en[key] !== "", `en is missing ${key}`);
+  }
+});
+
+test("the batch picker renders as collapsible partitions", async () => {
+  // The picker is rendered through the stub React (the platform's React is not
+  // installed here), so this asserts the *shape* of the tree the component
+  // builds: the partitions, their fold buttons, and the fact that folding one
+  // really takes its rows out of the tree.
+  const { exports } = await loadBundle();
+  const { DeletePickStep, storeInstance, dictionaries } = exports.__test;
+  const t = (key, params) => {
+    const template = dictionaries.zh[key] ?? key;
+    return params === undefined ? template : template.replace(/\{(\w+)\}/g, (_m, name) => String(params[name] ?? ""));
+  };
+  const plans = [
+    { sessionId: "a", cwd: "/w/one", deletable: true, exists: true, activity: [] },
+    { sessionId: "b", cwd: "/w/one", deletable: true, exists: true, activity: [] },
+    { sessionId: "c", cwd: "/w/two", deletable: true, exists: true, activity: [] }
+  ];
+  storeInstance.actions.setDialog({
+    mode: "batch",
+    plans,
+    selectedIds: [],
+    titleById: { a: "A", b: "B", c: "C" },
+    collapsedGroups: []
+  });
+
+  /** Every element in the tree, depth first. */
+  const walk = (node, out = []) => {
+    if (node === null || node === undefined) return out;
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child, out);
+      return out;
+    }
+    if (typeof node !== "object") return out;
+    out.push(node);
+    walk(node.children, out);
+    return out;
+  };
+
+  const tree = walk(DeletePickStep({ dialog: storeInstance.getSnapshot().dialog, t }));
+  const groups = tree.filter((node) => node.props?.className === "dsh-trash-group");
+  assert.equal(groups.length, 2, "one partition per workspace");
+  const toggles = tree.filter((node) => node.props?.className === "dsh-trash-groupToggle");
+  assert.equal(toggles.length, 2, "every partition can be folded away");
+  assert.equal(toggles[0].props["aria-expanded"], true, "a partition starts open");
+  const headers = tree.filter((node) => node.props?.className === "dsh-trash-groupHead");
+  assert.equal(headers.length, 2);
+
+  // Folding the first partition removes its rows from the tree.
+  toggles[0].props.onClick();
+  const after = walk(DeletePickStep({ dialog: storeInstance.getSnapshot().dialog, t }));
+  const folded = after.filter((node) => node.props?.className === "dsh-trash-group");
+  assert.equal(folded.length, 2, "the partition is still listed, only its rows are gone");
+  const foldedToggles = after.filter((node) => node.props?.className === "dsh-trash-groupToggle");
+  assert.equal(foldedToggles[0].props["aria-expanded"], false, "the folded partition says so");
+  const rowLists = after.filter((node) => node.props?.className === "dsh-trash-list");
+  assert.equal(rowLists.length, 1, "only the open partition still draws its rows");
+
+  // Unfolding it brings the rows back.
+  foldedToggles[0].props.onClick();
+  const reopened = walk(DeletePickStep({ dialog: storeInstance.getSnapshot().dialog, t }));
+  assert.equal(
+    reopened.filter((node) => node.props?.className === "dsh-trash-list").length,
+    2,
+    "the rows come back when the partition is unfolded again"
+  );
+  storeInstance.actions.setDialog(null);
 });

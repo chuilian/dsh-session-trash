@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-trash",
-  "version": "1.4.1",
+  "version": "1.6.0",
   "description": "Session deletion with a two-step confirmation, batch selection, and a recoverable recycle bin for the dsh Web GUI — adds the delete action DSH itself does not ship.",
   "icon": "icon.svg",
   "type": "module",

@@ -176,7 +176,7 @@
 | 19 | 审计日志接口 | 含 `trash:ok` 与 `delete:refused` |
 | 20 | `enabled: false` | 每个动作 404 `disabled`，且什么都没搬 |
 
-### 2.6 `tests/client/bundle.test.js`（33）
+### 2.6 `tests/client/bundle.test.js`（36）
 
 | # | 用例 | 断言要点 |
 |---|---|---|
@@ -208,6 +208,39 @@
 | 25 | **对话框说明「删除当前会话会结束这段对话」** | `dialog.current`（中英文）与 `dialog.currentTag` |
 | 26 | **恢复丢弃删除留下的 tombstone 实例并重开原页** | 删除时开着的会话留下的实例（`removed === true`）在恢复时被 `retireScope`/`drop` 掉；恢复结果包含它时 `uiWorkspace.openSession` 被调用 |
 | 27 | **复活失败时提示条降级成警告并说明原因** | `revived === false` → `tone: "warning"`，文案含 `notice.restoreNotLive` 与原因 |
+| 28 | **批量行按工作区分区** | `partitionPlans` 按 `cwd` 分组、尾部斜杠不另起分区、无工作区的行归入同一个分区、分组保持原顺序；`workspaceKey` / `workspaceName` |
+| 29 | **分区可折叠** | `toggleCollapsed` 只影响那一个键；`groupSelection` 报出总数/已选数/是否全选（空分区不算全选） |
+| 30 | **分区文案中英文都有** | `dialog.groupCount` / `groupSelected` / `expandAll` / `collapseAll` / `groupExpand` / `groupCollapse` 在 zh 与 en 都存在 |
+| 31 | **分区真的渲染成可折叠的分区** | 用替身 React 渲染 `DeletePickStep`：两个分区、两个折叠按钮、`aria-expanded` 为真；点折叠后该分区的行不再渲染，展开后回来 |
+| 32 | **同意标签说出真正适用的那一个理由** | `consentTag`：有工作 → `dialog.activity`；有 schedule 家族 → `dialog.scheduled`（带任务数）；仅被运行时持有 → `dialog.resident`；安静 → `null`；状态未知 → `dialog.activityUnknown`；schedule + resident 同时成立时取 schedule（不叠加两个标签） |
+| 33 | **选择汇总把四种原因分开计数** | `liveWorkCount` / `residentIdleCount` / `scheduledSessionCount` / `scheduledDeliveryCount` / `unknownActivityCount` 各自独立；`consentCount` 不变（仍决定按钮文案） |
+| 34 | **四种原因的文案中英文都有，且不再谎称「有工作」** | 6 个键在 zh 与 en 均存在；`dialog.consentResident` 不含「停止这些工作」而含「运行时」；`dialog.consentScheduled` 含「定时任务」；旧的单原因键 `dialog.consent` 已删除 |
+| 35 | **渲染出的行标签就是真正适用的那一个** | 替身 React 渲染 `DeletePickStep`：忙的会话出「仍有进行中的工作」，只是被持有的会话出「运行时仍持有」，有定时任务的会话出「N 个定时任务会投递到此会话」 |
+
+### 2.6b `tools/render-partitions.mjs`（开发工具，不进 `npm test`）
+
+插件的测试用替身 React 渲染（平台的 React 不在插件仓里）。这个工具借一台机器上碰巧存在的
+React（`DSH_REACT_MODULES`，或 `~/.dsh/plugin-test-deps/*` 里任意一个装齐 react + react-dom 的仓）
+用**真 React** 把批量列表渲染成静态 HTML：真实会话量（多个工作区、几十个会话）、插件自带的样式表、
+折叠前后的两份输出。它验证的是渲染路径本身——hooks、事件处理、状态更新——而不只是纯函数。
+
+```
+node tools/render-partitions.mjs        # 写出 /tmp/partitions.html 与 /tmp/partitions-folded.html
+```
+
+### 2.6c `tools/render-consent-tags.mjs`（开发工具，不进 `npm test`）
+
+这一次的缺陷是**措辞**的：聊完的会话仍被标成「仍有进行中的工作」。措辞的缺陷光靠断言看不出来——
+所以这个工具把**真实宿主预检结果**（`/session-trash/plan` 的实际返回，或一份保存下来的响应）用真 React
+渲染成静态 HTML：每一行带上它自己的原因标签，对话框说明区列出逐类分开的几行。肉眼看一眼就知道标签
+说对了没有。
+
+```
+node tools/render-consent-tags.mjs /tmp/plan.json     # 渲染保存下来的预检响应
+DSH_WEB_URL=http://127.0.0.1:59702 node tools/render-consent-tags.mjs   # 现取现渲染
+```
+
+输出 `/tmp/consent-tags.html`；控制台逐行打印每个会话的 `resident` / `activity` / 最终标签。
 
 ### 2.7 `tests/host/regressions.test.js`（17）
 
@@ -604,3 +637,31 @@ const toggle = (sessionId) => {
 **教训**：恢复的验收标准不能止于「文件字节一致」。**用户对恢复的期望是「能接着聊」**——把「文件回位」
 当成恢复完成的定义，就把一个会静默失败的中间态留在了用户面前。另外，任何「失败也要如实说出来」的
 路径都要检查**客户端有没有把它显示出来**：插件这边报了 `revived: false`，客户端不显示就等于没说。
+
+### 5.13 第六次用户实测缺陷：聊完的会话仍然标着「仍有进行中的工作」
+
+用户问：「这个判断的逻辑是什么？为什么有的会话我已经对话完毕了，还显示这个。」截图里那条
+「【BUG修复】删除会话插件」带着 **当前会话** + **仍有进行中的工作** 两个标签，按钮变成「强制删除」。
+
+对本机 44 个会话一次性预检（`POST http://127.0.0.1:52961/session-trash/plan`）后取证：14 个会话被标记，
+其中 **12 个是 `resident=true, running=false, activity=[]`**——它们什么都沒在做，唯一的「原因」是
+宿主进程里还留着这个会话（用户打开过就进活会话注册表，直到重启或删除）。真正在跑的只有 2 个。
+
+定位到的不是判定错误，而是**文案把两件事混成了一句**：
+
+- `needsConsent(plan)` = `resident === true || activityKnown === false || activity.length > 0`——
+  它判的是「要不要问用户」，这个门槛是对的（删除时确实需要释放运行时才安全）。
+- 而标签渲染把「运行时持有」和「有工作」写成同一句「仍有进行中的工作」，于是**每一件需要同意的事都被
+  说成「工作进行中」**，用户据此以为自己的会话还在忙。
+
+还有一个更隐蔽的错位：宿主的 `schedule` 提供方（`workspace/session-activity`）贡献的家族判据是
+「有一条 status 为 active 的定时任务指向该会话」，**与此刻是否在跑无关**；而 dsh-schedule 在
+`workspace/session-stop` 上会把那些任务行**从存储里真删掉**。所以定时任务既不是「工作进行中」，
+也不该被说得像它那样轻。
+
+修法：按真实原因分层——行内标签四选一（`consentTag`）、对话框说明逐类分开（`summarizeSelection` 的
+四个计数）、`needsConsent` 不动。设计决定见 `docs/ARCHITECTURE.md` §7.5.2；回归测试见 §2.6 的第
+32–34 条。
+
+**教训**：**门槛与文案是两件事**。门槛判「能不能删、要问谁」，文案判「为什么」。把两者合成一句，
+就会让正确的门槛说出错误的话；而这种话不会让操作失败，只会让用户对插件失去信任——所以它比崩溃更难被发现。

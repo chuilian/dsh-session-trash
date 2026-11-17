@@ -295,6 +295,12 @@ manifest 是恢复的唯一依据，所以先 fsync 再改名，而不是「写�
 | 有正在运行的工作，删掉会丢失用户可见的进度 | `workspace/session-activity` waterfall 返回非空 | `session-active`（附活动清单） |
 | 会话仍驻留内存，runtime 可能仍持写句柄，之后 flush 会在已删除目录里重建日志 | `ctx.get("sessions").get(id) !== undefined` | `session-live` |
 
+> **`workspace/session-activity` 返回非空 ≠ 「此刻有工作在跑」。** waterfall 会把每个提供方的家族原样带来，
+> 而 schedule 提供方的判据只是「有一条 status 为 active 的定时任务指向该会话」——与此刻是否在跑无关。
+> 宿主按「非空即需同意」来保护（这是安全方向，判据宁可偏严），但**客户端文案必须把这几种家族分开说**，
+> 否则「定时任务投递中」会被说成「工作进行中」，而前者被同意停止的代价是**定时任务被真删**。
+> 分层规则见 §7.5.2。
+
 只有调用方传 `stopActivity: true`（UI 上按钮变成「停止并删除」）时才继续。此后按顺序：
 
 ```
@@ -565,7 +571,7 @@ const storeSeat = { ...storeHandle, create: () => storeInstance };
 ```js
 {
   dialog: null | { mode:"single"|"batch", sessionIds, titleById, singleTitle,
-                   plans, selectedIds, step:1|2, pending, error, root },
+                   plans, selectedIds, collapsedGroups, step:1|2, pending, error, root },
   bin:    { status, items, broken, stats, error, selected, log },
   purge:  null | { trashIds, count, bytes, pending, error },
   notice: null | { text, tone, undo:{trashIds} | null }
@@ -582,8 +588,9 @@ const storeSeat = { ...storeHandle, create: () => storeInstance };
   → 若这一项「安静」（可删、非 resident、无进行中工作、未在运行）：
        不弹对话框，直接 POST /delete，Toast「会话已删除」+ 「撤销」/「查看回收站」
        ⇒ 常见情况下是「一次点击 = 删完」，而不是「点开→再点一次」
-  → 其余情况（运行中 / 有进行中的工作 / 目录定位不了）才打开对话框：
+  → 其余情况（运行中 / 有进行中的工作 / 有定时任务投递到它 / 目录定位不了）才打开对话框：
        展示标题 / 标签 / 原因 / 回收站路径 / “之后可随时恢复”，主按钮「删除」或「强制删除」
+       标签与说明按真实原因分层（见 §7.5.2），不是一律说「有工作在进行」
        快捷路径被宿主拒绝时，对话框带着拒绝原因打开，用户可以直接重试
   → payload.stopActivity = payload.force = 所选里存在需要同意的项
   → 若目标含当前打开的会话：先 uiWorkspace.openSession(幸存者) 或 clearMain()
@@ -600,6 +607,7 @@ const storeSeat = { ...storeHandle, create: () => storeInstance };
   → **按预检结果收敛列表**：剔除宿主判定为「已归档」与「已删除」的行
      （客户端看不到归档集合，只有宿主能区分「残留行」与「只是被隐藏的会话」）
   → 一次渲染全部行：每行都可勾选（标签只描述状态，不代替用户决定）
+  → **按工作区分区渲染**：分区 = 会话的 `cwd`；分区头有折叠按钮、组复选框与计数
   → 「全选」= 当前筛选结果；已选计数实时更新
   → 「删除」/「强制删除」= 一次点击
        payload 只带真正选中的会话；所选里存在需要同意的项 ⇒ stopActivity = force = true
@@ -616,6 +624,61 @@ const storeSeat = { ...storeHandle, create: () => storeInstance };
 **回收站恢复**：面板选中条目 → 「恢复选中」→ `POST /restore` → 刷新面板与会话列表 → Toast 报告恢复数量。原始路径被占用时该项返回 `occupied`，其余照常，条目保留在回收站。选中条目多于一次请求能带的数量时，按 `maxBatch` **切成多批**提交（与删除路径同一套切批逻辑），而不是整次被 `batch-too-large` 拒绝。
 
 **彻底删除**：面板 → 「彻底删除」/「清空回收站」→ 弹窗点「确认彻底删除」即 `POST /purge`（客户端把按钮点击翻译成 `acknowledge: true`，不再有单独的勾选步骤）→ 释放字节数写入 Toast。宿主端仍是权威：请求缺 `acknowledge` 就以 428 拒绝。同样按 `maxBatch` 切批；`["*"]` 哨兵是一个整体，永远只发一次请求。
+
+### 7.5.1 批量列表的分区与折叠
+
+几十个会话排成一张平铺的清单是没法看的：用户要的是「先找到那一堆，再看那一堆里有没有要删的」。
+因此批量列表按**工作区分区**渲染——分区维度就是会话自己的 `cwd`，也正是侧边栏已经在用的那个维度：
+
+```
+▼ [✓] project-alpha   /Users/example/Desktop/work/project-alpha      已选 3/12
+      ☑ 数据库迁移方案评审
+      ☐ 安装记录
+▶ [ ] project-beta      /Users/example/Desktop/work/project-beta            8 个会话
+▶ [ ] 未分组                                                              2 个会话
+```
+
+四条决定：
+
+- **分区是呈现层，不碰删除语义。** 选中集合、请求体、逐项结果与原因都与分区无关；分区只是把同一批行
+  换一种排法。纯函数（`partitionPlans` / `toggleCollapsed` / `groupSelection` / `workspaceKey` /
+  `workspaceName`）与渲染分开，因此这套逻辑在没有 DOM 的情况下也能测。
+- **分区键是路径，不是目录名。** 两个不同目录下同名的 `project-alpha` 必须是两个分区，所以键取完整路径
+  （去掉尾部斜杠），标题才是目录名，完整路径并排显示。
+- **组复选框只有全选/全不选两种状态。** 原语没有「半选」可渲染，于是部分选中时显示「已选 3/12」
+  而不是把复选框画成全选或全不选——那两种都会说谎。
+- **搜索优先于折叠。** 搜索词非空时，仍有命中的分区强制展开：一个看不见的命中不算命中。折叠状态
+  （`dialog.collapsedGroups`）是对话框状态的一部分，重新渲染不会丢；「全部展开 / 全部折叠」两个按钮
+  一次处理所有分区。
+
+### 7.5.2 需要同意的理由必须分层，不能一律说成「工作进行中」
+
+需要用户点「强制删除」的原因有**四种**，它们的**后果完全不同**：
+
+| 原因 | 判据 | 真实后果 |
+|---|---|---|
+| 有正在进行的工作 | `activity` 里存在 `kind !== "schedule"` 的家族 | 工作被停掉，且不会自动继续 |
+| 有定时任务会投递到此会话 | `activity` 里存在 `kind === "schedule"` 的家族 | 宿主 `workspace/session-stop` 会**真删**指向它的定时任务行 |
+| 会话只是仍被运行时持有 | `resident === true` 且没有任何 activity 家族 | 只需从运行时释放，**不会停止任何工作** |
+| 工作状态无法确认 | `activityKnown === false` | 先尝试停止可能仍在跑的工作 |
+
+其中 **schedule 家族不是「正在进行的工作」**：宿主的 schedule 提供方只判断「有一条 status 为 active 的定时
+任务指向该会话」，与此刻是否在跑无关；dsh-schedule 在 `workspace/session-stop` 上甚至会把那些任务行
+**从存储里删掉**。把它算进「工作进行中」，既是文案撒谎，也会让人低估删除的代价。
+
+因此：
+
+- **行内标签四选一**（`consentTag(plan)`，不是叠加）：`仍有进行中的工作` / `N 个定时任务会投递到此会话` /
+  `运行时仍持有` / `无法确认该会话是否仍有正在进行的工作`。之前是「有 activity 就说在进行中」，
+  于是聊完很久、只是内存里还留着的会话仍然标着「仍有进行中的工作」——用户报告的正是这一点。
+- **对话框说明逐类分开**（`summarizeSelection` 的 `liveWorkCount` / `unknownActivityCount` /
+  `scheduledDeliveryCount` / `residentIdleCount`），一行一个真实原因；「运行时仍持有」那一行不说
+  「会先停止这些工作」，因为没有工作可停。
+- **`needsConsent(plan)` 不变**：判定「要不要问用户」是安全问题，判定「怎么说」是文案问题。两者分开，
+  修文案不该动门槛。
+
+分层判定全部落在纯函数上（`liveWorkFamilies` / `scheduledDeliveries` / `hasScheduledDelivery` /
+`isResidentOnly` / `consentTag`），所以在没有 DOM 的情况下也能测。
 
 ### 7.6 样式
 
@@ -771,7 +834,29 @@ DSH 唯一可用的按 id 释放手段），而恢复只做「文件 rename 回�
 **不可逆的部分**：这次故障发生在修复之前，该会话的恢复动作已经做完——唯一的解法是重启 DSH，让宿主
 在启动时重新扫描会话目录。修复只保证**下一次**恢复不再出现这个问题。
 
-### 9.4 客户端三层测试各自负责什么
+### 9.4 第六次用户实测：聊完的会话仍然标着「仍有进行中的工作」
+
+用户问：「这个判断的逻辑是什么？为什么有的会话我已经对话完毕了，还显示这个。」——删除对话框里那一行
+挂着 **当前会话** + **仍有进行中的工作**，按钮变成了 **强制删除**。
+
+对全机 45 个会话一次性预检（`POST /session-trash/plan`）取证：需要同意的会话里，绝大多数是
+`resident: true, running: false, activity: []`——它们什么都没在做，唯一的「原因」是宿主进程里还留着
+这个会话（用户打开过就进活会话注册表，直到重启或删除）。
+
+于是要分清两件事：
+
+- **门槛是对的**：`needsConsent(plan)` 判的是「要不要问用户」，删除一个仍被运行时持有的会话确实需要
+  先释放它才安全。
+- **文案是错的**：标签把「运行时持有」和「有工作」写成同一句，于是**每一件需要同意的事都被说成
+  「工作进行中」**。用户据此以为自己的会话还在忙——这不会让任何操作失败，只会让插件失去信任。
+
+还有一个错位：`workspace/session-activity` 的 schedule 家族判据是「有 status 为 active 的定时任务指向
+该会话」，与此刻是否在跑无关；而 dsh-schedule 在 `workspace/session-stop` 上会把那些任务行**真删**。
+所以它既不是「工作进行中」，也不能被说得像它那样轻。
+
+修法与三条设计决定写在 §7.5.2；回归测试见 `tests/client/bundle.test.js` 的第 32–35 条。
+
+### 9.5 客户端三层测试各自负责什么
 
 | 层 | 能发现 | 发现不了 |
 |---|---|---|
