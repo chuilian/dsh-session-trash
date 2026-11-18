@@ -406,16 +406,33 @@ test("pure helpers: sizes and ages", async () => {
 
 test("pure helpers: consent and activity flattening", async () => {
   const { exports } = await loadBundle();
-  const { isDeletable, needsConsent, activityRows } = exports.__test;
+  const { isDeletable, needsConsent, needsForce, needsRelease, activityRows } = exports.__test;
   assert.equal(isDeletable({ deletable: true }), true);
   assert.equal(isDeletable({}), false);
-  assert.equal(needsConsent({ resident: true }), true);
+  // Only work that is actually running earns a dialog. The runtime holding a
+  // session (so it reopens instantly) is the plugin's own housekeeping: the user
+  // is not asked, the session is just released on the way out.
+  assert.equal(needsConsent({ resident: true }), false, "being held open is not work in progress");
   assert.equal(needsConsent({ activity: [{ kind: "turn" }] }), true);
   assert.equal(needsConsent({ activity: [] }), false);
+  assert.equal(needsConsent({ running: true }), true, "a turn in flight is work in progress");
+  // A scheduled task aimed at the session is a standing arrangement, not work
+  // running now — but deleting the session takes the task with it and an undo
+  // does not bring it back, so it still shows the dialog. It just does not claim
+  // that anything will be stopped (`needsForce` stays false).
+  const scheduledOnly = { activity: [{ kind: "schedule", items: [{ id: "s1" }] }] };
+  assert.equal(needsConsent(scheduledOnly), true, "losing a scheduled task is worth a look");
+  assert.equal(needsForce(scheduledOnly), false, "but nothing is running to be stopped");
   // An unknown activity state is not an idle one: the client must ask for
   // consent instead of pretending the session is quiet.
   assert.equal(needsConsent({ activityKnown: false }), true);
   assert.equal(needsConsent({ activityKnown: true, activity: [] }), false);
+  // What the host is told is the wider question, and it is answered without
+  // asking the user: release anything the runtime still holds.
+  assert.equal(needsRelease({ resident: true }), true);
+  assert.equal(needsRelease({ activity: [{ kind: "schedule", items: [{ id: "s1" }] }] }), true);
+  assert.equal(needsRelease({ activityKnown: false }), true);
+  assert.equal(needsRelease({ activity: [] }), false);
   assert.deepEqual(activityRows([{ kind: "turn" }, { kind: "job", items: [{ id: "1", label: "build" }] }]), [
     { kind: "turn", label: "turn" },
     { kind: "job", label: "build" }
@@ -448,9 +465,10 @@ test("pure helpers: the consent tag names the reason that actually applies", asy
   };
   assert.deepEqual(consentTag(scheduled), { key: "dialog.scheduled", tone: "warning", params: { count: 2 } });
 
-  // The runtime merely holding an idle session: 「运行时仍持有」, not 「工作进行中」.
+  // The runtime merely holding an idle session says nothing at all now: it is
+  // not a reason to delete or not to delete, so there is no label to read.
   const held = { sessionId: "held", resident: true, activityKnown: true, activity: [] };
-  assert.deepEqual(consentTag(held), { key: "dialog.resident", tone: null });
+  assert.equal(consentTag(held), null, "being held open is not a label-worthy fact");
 
   // A quiet session needs no label at all.
   assert.equal(consentTag({ sessionId: "quiet", resident: false, activityKnown: true, activity: [] }), null);
@@ -493,13 +511,16 @@ test("pure helpers: the selection summary counts each reason separately", async 
   ];
   const summary = summarizeSelection(plans, ["busy", "held", "scheduled", "unknown", "quiet"]);
   assert.equal(summary.liveWorkCount, 1, "only the session with work under way counts as busy");
-  assert.equal(summary.residentIdleCount, 1, "the held session is idle as far as work goes");
   assert.equal(summary.scheduledSessionCount, 1, "one session has scheduled tasks aimed at it");
   assert.equal(summary.scheduledDeliveryCount, 2, "two scheduled tasks in total");
   assert.equal(summary.unknownActivityCount, 1);
-  // The consent itself still covers every one of them: the count that decides
-  // the force-delete button is unchanged.
-  assert.equal(summary.consentCount, 4);
+  // The dialog opens for the three sessions that have something to lose: work
+  // under way, an unknown work state, and the scheduled task that goes with the
+  // session. The held session needs neither — releasing it is housekeeping.
+  assert.equal(summary.consentCount, 3, "work, unknown state, and the scheduled task all ask");
+  // The button only says 「强制删除」 when something might be stopped, so the
+  // scheduled-only session keeps the plain 「删除」.
+  assert.equal(summary.forceCount, 2, "only work and the unknown state can force a stop");
 });
 
 test("the consent copy exists in both languages and names each reason", async () => {
@@ -508,19 +529,22 @@ test("the consent copy exists in both languages and names each reason", async ()
   for (const key of [
     "dialog.consentWork",
     "dialog.consentScheduled",
-    "dialog.consentResident",
     "dialog.consentUnknown",
     "dialog.scheduled",
-    "dialog.resident"
+    "notice.scheduledGone"
   ]) {
     assert.ok(typeof zh[key] === "string" && zh[key] !== "", `zh is missing ${key}`);
     assert.ok(typeof en[key] === "string" && en[key] !== "", `en is missing ${key}`);
   }
-  // The resident reason must not tell the user their work will be stopped: for
-  // these sessions nothing is running, they are only held open.
-  assert.ok(!/停止这些工作/.test(zh["dialog.consentResident"]), "a held session has no work to stop");
-  assert.ok(/运行时/.test(zh["dialog.consentResident"]), "the resident reason names the runtime");
+  // Two reasons are gone on purpose: the runtime holding a session is no longer
+  // something the user is asked about, so it has no copy left to ask with.
+  for (const key of ["dialog.consentResident", "dialog.resident"]) {
+    assert.equal(zh[key], undefined, `zh still has ${key}`);
+    assert.equal(en[key], undefined, `en still has ${key}`);
+  }
   assert.ok(/定时任务/.test(zh["dialog.consentScheduled"]), "the scheduled reason names the scheduled tasks");
+  assert.ok(/定时任务/.test(zh["notice.scheduledGone"]), "the result says which tasks went with the session");
+  assert.ok(!/恢复/.test(zh["notice.scheduledGone"].replace(/不会自动恢复/g, "")), "the copy does not promise a restore");
   // The old single-reason key is gone: it claimed every consented session was
   // busy.
   assert.equal(zh["dialog.consent"], undefined);
@@ -579,8 +603,12 @@ test("the row shows the reason that applies, not a blanket \"work in progress\""
     }
   }
   assert.ok(texts.includes("仍有进行中的工作"), "the busy session says work is in progress");
-  assert.ok(texts.includes("运行时仍持有"), "the merely held session says the runtime holds it");
   assert.ok(texts.includes("1 个定时任务会投递到此会话"), "the scheduled session names its scheduled task");
+  // The merely held session carries no label at all: nothing about it needs a
+  // decision, so nothing is written next to it.
+  assert.ok(!texts.includes("运行时仍持有"), "a held session is not labelled");
+  const heldRow = tree.filter((node) => node.props?.className === "dsh-trash-row");
+  assert.equal(heldRow.length, 3, "all three rows are listed");
 });
 
 test("pure helpers: selection summary carries real sizes", async () => {
@@ -1107,10 +1135,10 @@ test("the confirm button says 删除, not 移入回收站", async () => {
   assert.match(zh["dialog.desc.single"], /回收站/);
   assert.match(zh["dialog.desc.batch"], /回收站/);
   assert.match(zh["dialog.consentWork"], /强制删除/);
-  // Each reason the consent covers gets its own sentence: a session the
-  // runtime merely holds is not told that its work will be stopped.
-  assert.match(zh["dialog.consentResident"], /运行时/);
+  // The reasons still have their own sentences, and the runtime merely holding a
+  // session no longer has one: it is not a decision the user makes.
   assert.match(zh["dialog.consentScheduled"], /定时任务/);
+  assert.equal(zh["dialog.consentResident"], undefined);
   assert.equal(zh["notice.trashed"], "会话已删除");
   assert.match(zh["notice.trashedMany"], /已删除/);
   // No locale may keep the old two-step wording.
@@ -1133,6 +1161,54 @@ test("the rendered dialog offers exactly one destructive action", async () => {
   assert.match(t("dialog.consentWork", { count: 2 }), /强制删除/);
   assert.equal(t("notice.trashed"), "会话已删除");
   assert.equal(typeof storeInstance.getSnapshot, "function");
+});
+
+test("a dialog about a scheduled task says so with the plain delete button", async () => {
+  // The consequence (the task goes with the session) has to be visible before
+  // it happens — but nothing is running, so calling the button 「强制删除」 would
+  // claim a stop that never occurs.
+  const { exports } = await loadBundle();
+  const { DeleteConsequences, summarizeSelection, needsForce, storeInstance, dictionaries } = exports.__test;
+  const t = (key, params) => {
+    const template = dictionaries.zh[key] ?? key;
+    return params === undefined ? template : template.replace(/\{(\w+)\}/g, (_m, name) => String(params[name] ?? ""));
+  };
+  const plan = {
+    sessionId: "sched",
+    deletable: true,
+    exists: true,
+    resident: true,
+    activityKnown: true,
+    running: false,
+    activity: [{ kind: "schedule", items: [{ id: "s1" }, { id: "s2" }] }]
+  };
+  const summary = summarizeSelection([plan], ["sched"]);
+  assert.equal(summary.consentCount, 1, "the dialog opens");
+  assert.equal(summary.forceCount, 0, "but nothing is stopped, so the button stays 「删除」");
+  assert.equal(needsForce(plan), false);
+
+  const dialog = { mode: "single", plans: [plan], selectedIds: ["sched"], titleById: {} };
+  const walk = (node, out = []) => {
+    if (node === null || node === undefined) return out;
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child, out);
+      return out;
+    }
+    if (typeof node !== "object") return out;
+    out.push(node);
+    walk(node.children, out);
+    return out;
+  };
+  const texts = [];
+  for (const node of walk(DeleteConsequences({ dialog, t }))) {
+    for (const child of node.children ?? []) {
+      if (typeof child === "string") texts.push(child);
+    }
+  }
+  const joined = texts.join(" ");
+  assert.match(joined, /定时任务/, "the dialog names the scheduled tasks that will go");
+  assert.match(joined, /不会自动恢复/, "and says they do not come back");
+  assert.ok(!/强制删除/.test(joined), "it must not offer to force a stop that is not needed");
 });
 
 test("a listed session with no files reads as already deleted, not as a failure", async () => {
@@ -1176,6 +1252,12 @@ test("the forced-delete notice says the session was released; the residue notice
   assert.match(dictionaries.zh["notice.forced"], /运行时/);
   assert.match(dictionaries.zh["notice.forced"], /列表/);
   assert.match(dictionaries.en["notice.forced"], /runtime/i);
+  // Every session the runtime holds is released without asking now, so this note
+  // appears for ordinary deletes too. It must not claim that work was stopped:
+  // for most of those sessions nothing was running.
+  for (const text of [dictionaries.zh["notice.forced"], dictionaries.en["notice.forced"]]) {
+    assert.ok(!/工作已停止|work was stopped/.test(text), `the forced note must not claim work was stopped: ${text}`);
+  }
   // The residue notice is the one that still has to explain where a leftover row
   // went: archived out of sight now, gone after a restart.
   assert.match(dictionaries.zh["notice.residue"], /归档/);
@@ -1274,10 +1356,15 @@ test("pure helpers: only a session with nothing running is a quick delete", asyn
   const { exports } = await loadBundle();
   const { isQuickDelete } = exports.__test;
   assert.equal(isQuickDelete({ deletable: true, resident: false, activity: [] }), true);
-  // Anything that would stop work, or that cannot be located, keeps the dialog so
-  // the consequence is on screen before anything moves.
-  assert.equal(isQuickDelete({ deletable: true, resident: true, activity: [] }), false);
+  // Only work actually running keeps the dialog. A session the runtime still
+  // holds is released on the way out, quietly: that is housekeeping, not a
+  // decision, and asking about it is what made the dialog feel like noise.
+  assert.equal(isQuickDelete({ deletable: true, resident: true, activity: [] }), true);
+  // A scheduled task aimed at the session keeps the dialog: the task is removed
+  // with the session and the undo does not restore it.
+  assert.equal(isQuickDelete({ deletable: true, resident: true, activity: [{ kind: "schedule", items: [{ id: "s1" }] }] }), false);
   assert.equal(isQuickDelete({ deletable: true, resident: false, activity: [{ kind: "turn" }] }), false);
+  assert.equal(isQuickDelete({ deletable: true, resident: false, activityKnown: false }), false);
   assert.equal(isQuickDelete({ deletable: false, resident: false, activity: [] }), false);
   assert.equal(isQuickDelete({ deletable: true, resident: false, activity: [], running: true }), false);
   assert.equal(isQuickDelete(null), false);

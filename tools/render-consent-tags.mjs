@@ -190,15 +190,19 @@ const exports = registration.factory((specifier) => {
   return modules[specifier];
 });
 
-const { DeletePickStep, DeleteConsequences, storeInstance, dictionaries, consentTag } = exports.__test;
+const { DeletePickStep, DeleteConsequences, storeInstance, dictionaries, consentTag, needsConsent, needsForce, isQuickDelete } =
+  exports.__test;
 const t = (key, params) => {
   const template = dictionaries.zh[key] ?? key;
   return params === undefined ? template : template.replace(/\{(\w+)\}/g, (_m, name) => String(params[name] ?? ""));
 };
 
-// Only the rows that need the user's consent are interesting here: the rest
-// carry no reason at all.
+// Only the rows that carry a label are interesting here. Whether the dialog
+// opens and whether the button is renamed are two different questions, and the
+// point of this page is to see both answers next to the same rows.
 const interesting = plans.filter((plan) => consentTag(plan) !== null);
+const asking = interesting.filter((plan) => needsConsent(plan));
+const oneClick = plans.filter((plan) => isQuickDelete(plan));
 const titles = {
   "session-1a6614fb-0c1a-4336-9496-9b778e5c3651": "股票看台与买入提醒（两个定时任务投递到这里）",
   "session-ee1f581d-9db": "【BUG修复】删除会话插件（正在跑）"
@@ -218,6 +222,20 @@ storeInstance.actions.setDialog({
 const dialog = storeInstance.getSnapshot().dialog;
 const picker = ReactDOMServer.renderToStaticMarkup(React.createElement(DeletePickStep, { dialog, t }));
 const consequences = ReactDOMServer.renderToStaticMarkup(React.createElement(DeleteConsequences, { dialog, t }));
+// What the user actually meets when they pick one row from the menu: work in
+// progress opens a dialog that offers to stop it, a scheduled task opens a
+// dialog that offers a plain delete, and the rest are already gone.
+const singleBusy = interesting.find((plan) => needsForce(plan));
+const singleScheduled = interesting.find((plan) => needsConsent(plan) && !needsForce(plan));
+const singleDialog = (plan) =>
+  plan === undefined
+    ? ""
+    : ReactDOMServer.renderToStaticMarkup(
+        React.createElement(DeleteConsequences, {
+          dialog: { mode: "single", plans: [plan], selectedIds: [plan.sessionId], titleById: {} },
+          t
+        })
+      );
 
 const cssMatch = source.match(/const CSS = `([\s\S]*?)`;/);
 const pluginCss = cssMatch === null ? "" : cssMatch[1];
@@ -231,12 +249,19 @@ ${pluginCss}
 [data-primitive="Tag"] { display:inline-block; padding:1px 7px; border-radius:10px; background:var(--dsw-alias-bg-layer-1); border:1px solid var(--dsw-alias-border-l3); margin-left:6px; }
 [data-primitive="Tag"][data-tone="warning"] { color:var(--dsw-alias-state-warn-primary); }
 .dsh-trash-summary { margin-top:18px; padding-top:12px; border-top:1px solid var(--dsw-alias-border-l3); }
-</style><body><h3 style="margin:0 0 10px">需要同意的会话，各自带的原因标签</h3>${body}<div class="dsh-trash-summary"><h3 style="margin:0 0 6px">对话框说明（逐类分开）</h3>${consequences}</div></body>`;
+</style><body><h3 style="margin:0 0 10px">会带标签的会话：该问的都会问，但按钮说实话</h3>${body}<div class="dsh-trash-summary"><h3 style="margin:0 0 6px">对话框说明（逐类分开）</h3>${consequences}</div>
+<div class="dsh-trash-summary"><h3 style="margin:0 0 6px">真的有工作在跑 → 弹框，按钮是「强制删除」</h3>${singleDialog(singleBusy) || '<p class="dsh-trash-muted">（这一批里没有在跑的会话）</p>'}</div>
+<div class="dsh-trash-summary"><h3 style="margin:0 0 6px">只有定时任务指向它 → 也弹框，按钮是「删除」</h3>${singleDialog(singleScheduled) || '<p class="dsh-trash-muted">（这一批里没有这类会话）</p>'}</div>
+<div class="dsh-trash-summary"><h3 style="margin:0 0 6px">两者都没有（只是还留在内存里）→ 一点即删，不弹对话框</h3><p class="dsh-trash-muted">点「删除会话」后没有任何确认，直接执行；结果为：${t("notice.trashed")}</p></div>
+</div></body>`;
 
 await fs.writeFile("/tmp/consent-tags.html", page(picker));
-console.log("rows with a reason:", interesting.length);
+console.log(`rows with a label: ${interesting.length} · open a dialog: ${asking.length} · one-click: ${oneClick.length}`);
 for (const plan of interesting) {
   const tag = consentTag(plan);
-  console.log(`  ${plan.sessionId.slice(0, 20)}  resident=${plan.resident}  activity=${JSON.stringify((plan.activity ?? []).map((f) => f.kind))}  ->  ${t(tag.key, tag.params)}`);
+  const verdict = needsForce(plan) ? "弹框 + 强制删除" : needsConsent(plan) ? "弹框 + 删除" : "一点即删";
+  console.log(
+    `  ${plan.sessionId.slice(0, 20)}  resident=${plan.resident}  activity=${JSON.stringify((plan.activity ?? []).map((f) => f.kind))}  ->  ${t(tag.key, tag.params)}  [${verdict}]`
+  );
 }
 console.log("wrote /tmp/consent-tags.html");

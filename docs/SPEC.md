@@ -49,7 +49,7 @@ DSH 侧栏的「会话设置」菜单（截图中的右键/更多菜单）当前
 - **FR-1.1** 在 `sidebar.workspaces.session.menu.item` 槽位新增「删除会话」行，`order = 500`，排在归档（400）之后，使破坏性操作位于菜单末尾。
 - **FR-1.2** 使用组件库的 `MenuItemButton`，`danger = true`，图标 `IconTrashOutlineRegular`，文案走插件自己的 locale 命名空间 `sessionTrash`。与现有四项在结构、尺寸、图标风格、快捷键位（无）上完全一致。
 - **FR-1.3** 选择该项后先关闭菜单，再打开确认对话框（菜单随行卸载，因此对话框必须注册在 `shell.overlay`）。
-- **FR-1.4** 「安静」的会话（可删、未被宿主持有、无进行中的工作、未在运行）**跳过对话框**：预检通过即直接删除，只留可撤销的 Toast。需要同意的会话（运行中 / 有定时任务投递到它 / 宿主仍持有）才打开对话框，把「强制删除」这个后果摆在用户眼前。判定复用 `isQuickDelete(plan)`，与 FR-2.3 的文案规则同源。
+- **FR-1.4** **有两种情况会停下来问一句**：这个会话真的还在跑，或**有定时任务指向它**（删掉会话会把那些任务一起删掉、撤销也救不回来）。其余情况（含「只是还留在 DSH 内存里」）一律一点即删，只留可撤销的 Toast。判定复用 `isQuickDelete(plan)` = 可删 && `needsConsent(plan) === false` && 未在运行。
 - **FR-1.5** 快捷路径被宿主拒绝时（例如恰好在这一刻开始运行），对话框带着那条拒绝原因打开，用户可以当场重试——而不是弹一个失败 Toast 让用户从头再来。
 
 ### FR-2 单步确认流程（点击即进回收站）✅ 已实现
@@ -58,24 +58,25 @@ DSH 侧栏的「会话设置」菜单（截图中的右键/更多菜单）当前
 
 - **FR-2.1** 菜单「删除会话」打开对话框，对话框本身承担全部确认职责：列出将删除的会话（标题、`运行中` / `已归档` / `已置顶` 标签、原因标签）、回收站路径、以及「之后可随时在那里恢复」。
 - **FR-2.2** 对话框的主按钮**一次点击即完成删除**。不存在「下一步」：弹窗的职责就是确认删除本身，点击即删除。
-- **FR-2.3** 主按钮文案随状态变化（**文案是契约，不是措辞**）：
-  - 无进行中的工作 → **删除**；
-  - 存在进行中的工作、存在投递到该会话的定时任务、或会话仍被运行时占用 → **强制删除**。
+- **FR-2.3** **问不问用户，与按钮叫什么，是两个不同的问题。**
+  - **弹不弹对话框**：`needsConsent(plan)` = 真的在跑（`running === true` 或有非 `schedule` 的 activity 家族）｜工作状态无法确认（`activityKnown === false`）｜**有定时任务指向它**（`hasScheduledDelivery`）。第三种不会打断任何东西，但会丢东西——所以它显示对话框而不改名按钮。
+  - **按钮文案**：`forceCount > 0` → **强制删除**；否则 **删除**。`needsForce(plan)` 只看「可能被打断的工作」（前两种）。有定时任务指向的会话虽然弹框，按钮仍是 **删除**，因为确实没有工作要停。
 
-  按钮上方必须**按真实原因分层说明**，而不是把所有需要同意的会话都说成「有工作在进行」：
+  | 事实 | 弹框？ | 按钮 | 对话框要说的话 |
+  |---|---|---|---|
+  | 有正在进行的工作 | 是 | **强制删除** | 「会先停止这些工作，被停止的工作不会自动继续」 |
+  | 工作状态无法确认 | 是 | **强制删除** | 「会先尝试停止它们可能仍在进行的工作」 |
+  | 有定时任务会投递到此会话 | 是 | **删除** | 「删除会连带删掉这些定时任务，它们不会自动恢复」 |
+  | 会话只是仍被运行时持有 | 否 | — | 一点即删，连标签都不出（释放是插件自己的事） |
 
-  | 真实原因 | 说明文案要点 |
-  |---|---|
-  | 有正在进行的工作 | 「会先停止这些工作，被停止的工作不会自动继续」 |
-  | 有定时任务会投递到选中的会话 | 「此刻并没有在跑；删除会连带删掉这些定时任务，它们不会自动恢复」 |
-  | 会话只是仍被运行时持有 | 「没有正在运行的工作；会先把它从运行时释放，不会停止任何工作」 |
-  | 工作状态无法确认 | 「会先尝试停止它们可能仍在进行的工作」 |
-
-  行内**原因标签**同样按真实原因取值，四选一（不是叠加）：`仍有进行中的工作` / `N 个定时任务会投递到此会话` / `运行时仍持有` / `无法确认该会话是否仍有正在进行的工作`。判据由 `consentTag(plan)` 给出（`activityKnown === false` → 无法确认；有非 `schedule` 的 activity 家族 → 有工作；有 `schedule` 家族 → 定时任务；否则 `resident` → 运行时仍持有）。
+  行内**原因标签**三选一（不是叠加）：`仍有进行中的工作` / `N 个定时任务会投递到此会话` / `无法确认该会话是否仍有正在进行的工作`；判据由 `consentTag(plan)` 给出。「运行时仍持有」不再是标签——它对用户的决定没有任何影响。
 
   **定时任务家族（`kind: "schedule"`）不是「正在进行的工作」**：宿主 `workspace/session-activity` 的 schedule 提供方只判断「有一条 status 为 active 的定时任务指向该会话」，与此刻是否在跑无关；把它算进「工作进行中」正是已结束的对话仍被标成「仍有进行中的工作」的原因。
 
+  **但定时任务会随会话一起消失**：宿主强制释放后会派发 `workspace/session-stop`，dsh-schedule 在那一层把指向该会话的任务行**从存储里删掉**。删除结果的提示条还要再写一遍「已一并删掉 N 个投递到这些会话的定时任务（不会自动恢复）」——对话框已经关掉了，撤销也只恢复会话。
+
   按钮命名的是**动作**（删除），不是文件的去向（回收站）。去向由对话框描述与结果提示负责说明——这既符合用户的预期，也是本需求被明确要求两次的点，因此由测试固定（见 `TEST-PLAN.md` 用例 18/19）。
+- **FR-2.3a** **「要不要问用户」与「要告诉宿主什么」是两个问题。** 客户端发给宿主的 `stopActivity` / `force` 由 `needsRelease(plan)` 决定（`resident === true`、有任意 activity 家族、或状态未知），与 `needsConsent` 解耦：**即使不弹对话框**，只要运行时还持有该会话，请求里也带上释放许可，否则宿主会以 `session-live` 拒绝。「会话只是还留在内存里」不能变成「删不掉」。
 - **FR-2.4** 未选中任何会话时主按钮禁用，避免空提交。
 - **FR-2.5** 执行期间按钮禁用，避免重复提交；失败原因（按条目的 `code`/`message`）汇总显示，而不是只给一个数量。
 - **FR-2.6** **删除必须成功，不能把用户卡死。** 用户同意「停止并删除」之后，宿主的责任是把删除做完，而不是因为运行时还持有该会话就拒绝。释放会话是宿主的职责，不是用户的操作要求：
@@ -283,7 +284,10 @@ DSH 侧栏的「会话设置」菜单（截图中的右键/更多菜单）当前
 | AC-30 | **复活失败不把恢复报成失败**，且界面把「文件回来了但没活过来」讲清楚 | 同上（`ok: true` 加 `revived: false` 与原因）+ 客户端测试 `a restore that could not re-attach the session says so`（tone=warning、文案含原因） |
 | AC-31 | 恢复后不使用删除时留下的陈旧实例，并把原来那一页重新打开 | 客户端测试 `a restore drops the tombstone the delete left behind and reopens the session` |
 | AC-32 | **批量列表按工作区分区，每区可折叠展开**；分区头带组复选框与计数；折叠后该区行不再渲染 | 客户端测试 `pure helpers: the batch rows are partitioned by the workspace they belong to`、`pure helpers: a partition remembers whether it is folded away`、`pure helpers: a partition reports how much of it is selected`、`the batch picker renders as collapsible partitions` |
-| AC-33 | **需要同意的理由按真实原因分层**：行内标签四选一、对话框说明逐类分开，已结束的会话不再被标成「仍有进行中的工作」 | 客户端测试 `pure helpers: the consent tag names the reason that actually applies`、`pure helpers: the selection summary counts each reason separately`、`the consent copy exists in both languages and names each reason` |
+| AC-33 | **该问的才问**：真的在跑、状态未知、有定时任务指向 → 弹框；只是被运行时持有 → 一点即删且不带标签 | 客户端测试 `pure helpers: the consent tag names the reason that actually applies`、`pure helpers: the selection summary counts each reason separately`、`the consent copy exists in both languages and names each reason`、`pure helpers: only a session with nothing running is a quick delete` |
+| AC-33a | **没工作要停时按钮不改名**：有定时任务的会话弹框但按钮是「删除」，且对话框只说任务会被删掉 | 客户端测试 `a dialog about a scheduled task says so with the plain delete button` |
+| AC-34 | **不弹对话框也要告诉宿主可以释放**：`stopActivity`/`force` 由 `needsRelease` 决定，携带驻留会话的删除不会被 `session-live` 拒绝 | 客户端测试 `pure helpers: the delete payload carries every selected session`（驻留项 → `stopActivity: true`） |
+| AC-35 | **随会话消失的定时任务必须在结果里说明**（撤销不恢复它们） | 客户端测试 `the consent copy exists in both languages and names each reason`（`notice.scheduledGone` 中英文齐备且含「定时任务」） |
 | AC-13 | 原有四项功能不受影响 | 未触碰其注册代码；人工回归 |
 
 ---

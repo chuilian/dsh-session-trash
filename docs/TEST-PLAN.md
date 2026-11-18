@@ -176,7 +176,7 @@
 | 19 | 审计日志接口 | 含 `trash:ok` 与 `delete:refused` |
 | 20 | `enabled: false` | 每个动作 404 `disabled`，且什么都没搬 |
 
-### 2.6 `tests/client/bundle.test.js`（36）
+### 2.6 `tests/client/bundle.test.js`（38）
 
 | # | 用例 | 断言要点 |
 |---|---|---|
@@ -212,10 +212,12 @@
 | 29 | **分区可折叠** | `toggleCollapsed` 只影响那一个键；`groupSelection` 报出总数/已选数/是否全选（空分区不算全选） |
 | 30 | **分区文案中英文都有** | `dialog.groupCount` / `groupSelected` / `expandAll` / `collapseAll` / `groupExpand` / `groupCollapse` 在 zh 与 en 都存在 |
 | 31 | **分区真的渲染成可折叠的分区** | 用替身 React 渲染 `DeletePickStep`：两个分区、两个折叠按钮、`aria-expanded` 为真；点折叠后该分区的行不再渲染，展开后回来 |
-| 32 | **同意标签说出真正适用的那一个理由** | `consentTag`：有工作 → `dialog.activity`；有 schedule 家族 → `dialog.scheduled`（带任务数）；仅被运行时持有 → `dialog.resident`；安静 → `null`；状态未知 → `dialog.activityUnknown`；schedule + resident 同时成立时取 schedule（不叠加两个标签） |
-| 33 | **选择汇总把四种原因分开计数** | `liveWorkCount` / `residentIdleCount` / `scheduledSessionCount` / `scheduledDeliveryCount` / `unknownActivityCount` 各自独立；`consentCount` 不变（仍决定按钮文案） |
-| 34 | **四种原因的文案中英文都有，且不再谎称「有工作」** | 6 个键在 zh 与 en 均存在；`dialog.consentResident` 不含「停止这些工作」而含「运行时」；`dialog.consentScheduled` 含「定时任务」；旧的单原因键 `dialog.consent` 已删除 |
-| 35 | **渲染出的行标签就是真正适用的那一个** | 替身 React 渲染 `DeletePickStep`：忙的会话出「仍有进行中的工作」，只是被持有的会话出「运行时仍持有」，有定时任务的会话出「N 个定时任务会投递到此会话」 |
+| 32 | **同意标签说出真正适用的那一个理由** | `consentTag`：有工作 → `dialog.activity`；有 schedule 家族 → `dialog.scheduled`（带任务数）；安静 → `null`；状态未知 → `dialog.activityUnknown`；**仅被运行时持有 → `null`**（不再是一个标签） |
+| 33 | **选择汇总按事实分开计数** | `liveWorkCount` / `scheduledSessionCount` / `scheduledDeliveryCount` / `unknownActivityCount` 各自独立；`consentCount` 数「要弹框」的三类（工作 + 未知 + 定时任务）；`forceCount` 只数「可能被打断」的两类 |
+| 34 | **文案中英文都有，且不再编造不存在的原因** | `dialog.consentWork` / `consentScheduled` / `consentUnknown` / `dialog.scheduled` / `notice.scheduledGone` 在 zh 与 en 均存在；`dialog.consentResident` 与 `dialog.resident` **已删除**；旧单原因键 `dialog.consent` 已删除；`notice.forced` 不得出现「工作已停止」 |
+| 35 | **渲染出的行标签就是真正适用的那一个** | 替身 React 渲染 `DeletePickStep`：忙的会话出「仍有进行中的工作」，有定时任务的会话出「N 个定时任务会投递到此会话」，被运行时持有的**不出任何标签**且三行都仍列出 |
+| 35b | **有定时任务时按钮不改名** | 只带 schedule 家族的单会话：`consentCount` 1、`forceCount` 0、`needsForce` false；渲染出的说明含「定时任务」「不会自动恢复」，且**不含**「强制删除」 |
+| 36 | **该问的才问，该释放的照样释放** | `needsConsent`：`resident` 不算、`running === true` 算、状态未知算、**`schedule` 家族算**；`needsForce`：schedule 家族不算；`needsRelease`：`resident` / 任意 activity / 未知全为真；`isQuickDelete`：仅被运行时持有的为 true、被定时任务指向的为 **false** |
 
 ### 2.6b `tools/render-partitions.mjs`（开发工具，不进 `npm test`）
 
@@ -643,25 +645,31 @@ const toggle = (sessionId) => {
 用户问：「这个判断的逻辑是什么？为什么有的会话我已经对话完毕了，还显示这个。」截图里那条
 「【BUG修复】删除会话插件」带着 **当前会话** + **仍有进行中的工作** 两个标签，按钮变成「强制删除」。
 
-对本机 44 个会话一次性预检（`POST http://127.0.0.1:52961/session-trash/plan`）后取证：14 个会话被标记，
-其中 **12 个是 `resident=true, running=false, activity=[]`**——它们什么都沒在做，唯一的「原因」是
-宿主进程里还留着这个会话（用户打开过就进活会话注册表，直到重启或删除）。真正在跑的只有 2 个。
+对本机 44 个会话一次性预检（`POST /session-trash/plan`）后取证：14 个会话被标记，其中 **12 个是
+`resident=true, running=false, activity=[]`**——它们什么都没在做，唯一的「原因」是宿主进程里还留着这个
+会话（用户打开过就进活会话注册表，直到重启或删除）。真正在跑的只有 2 个。
 
-定位到的不是判定错误，而是**文案把两件事混成了一句**：
+这件事被用户纠正了**两次**，两次都指向同一个毛病：把「安不安全」和「该不该打扰用户」合成一个布尔。
 
-- `needsConsent(plan)` = `resident === true || activityKnown === false || activity.length > 0`——
-  它判的是「要不要问用户」，这个门槛是对的（删除时确实需要释放运行时才安全）。
-- 而标签渲染把「运行时持有」和「有工作」写成同一句「仍有进行中的工作」，于是**每一件需要同意的事都被
-  说成「工作进行中」**，用户据此以为自己的会话还在忙。
+**第一轮（只改文案）**：行内标签按真实原因四选一（`consentTag`）、对话框说明逐类分开
+（`summarizeSelection` 的分项计数），`needsConsent` 保持不动。用户随即否掉了前提：「我需要的是真正在
+运行中的会话能删除需要确认，其他的都不需要，都可以直接删除的。」
 
-还有一个更隐蔽的错位：宿主的 `schedule` 提供方（`workspace/session-activity`）贡献的家族判据是
-「有一条 status 为 active 的定时任务指向该会话」，**与此刻是否在跑无关**；而 dsh-schedule 在
-`workspace/session-stop` 上会把那些任务行**从存储里真删掉**。所以定时任务既不是「工作进行中」，
-也不该被说得像它那样轻。
+**第二轮（改门槛）**：`needsConsent` 收到「真的在跑」，`stopActivity`/`force` 改用新的 `needsRelease`
+（不弹框也照发，否则宿主会以 `session-live` 拒绝），代价（定时任务会随会话消失）移到删除结果的提示条。
+用户又补了一句：「有这种情况的（定时任务指向它），还是需要提示的。」
 
-修法：按真实原因分层——行内标签四选一（`consentTag`）、对话框说明逐类分开（`summarizeSelection` 的
-四个计数）、`needsConsent` 不动。设计决定见 `docs/ARCHITECTURE.md` §7.5.2；回归测试见 §2.6 的第
-32–34 条。
+**第三轮（定稿）**：三个判定各管一件事——
 
-**教训**：**门槛与文案是两件事**。门槛判「能不能删、要问谁」，文案判「为什么」。把两者合成一句，
-就会让正确的门槛说出错误的话；而这种话不会让操作失败，只会让用户对插件失去信任——所以它比崩溃更难被发现。
+| 问题 | 判定 | 依据 |
+|---|---|---|
+| 弹不弹框 | `needsConsent` | `running` / 非 `schedule` 的 activity 家族 / `activityKnown === false` / 有 `schedule` 家族 |
+| 按钮改不改名 | `needsForce` | 前三条，去掉 `schedule`（没有东西要停，只是有东西会丢） |
+| 要不要通知宿主释放 | `needsRelease` | `resident` / 任意 activity / 状态未知 |
+
+设计决定见 `docs/ARCHITECTURE.md` §7.5.2；回归测试见 §2.6 的第 32–36 条与 35b。
+
+**教训**：**「安不安全」和「该不该打扰用户」不是一个布尔能同时回答的**。第一轮把话说对了，但用户受不了
+的是「被问一件他不在意的事」——问题在触发条件，不在措辞；第二轮把门槛放开，却又把定时任务会消失这件事
+藏了起来。每放开一类「不问」，都必须找到另一个地方把它的代价说出来；每保留一类「要问」，又必须让它的
+按钮和文案不夸大事实。
