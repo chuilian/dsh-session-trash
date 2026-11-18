@@ -1785,7 +1785,7 @@ test("pure helpers: the batch rows are partitioned by the workspace they belong 
   );
   assert.equal(workspaceKey("/a/b/"), "/a/b");
   assert.equal(workspaceKey("   "), "");
-  assert.equal(workspaceName("/a/b/project-alpha"), "project-alpha");
+  assert.equal(workspaceName("/a/b/project-x"), "project-x");
   assert.equal(workspaceName(""), null);
   assert.deepEqual(partitionPlans(undefined), []);
 });

@@ -1,7 +1,7 @@
 {
   "name": "dsh-session-trash",
   "version": "1.7.0",
-  "description": "Session deletion with a two-step confirmation, batch selection, and a recoverable recycle bin for the dsh Web GUI — adds the delete action DSH itself does not ship.",
+  "description": "Session deletion for the DSH Web GUI: a two-step confirmation, batch selection, and a recoverable recycle bin — the delete action DSH itself does not ship. · DSH 网页端会话删除：两步确认、批量选择与可恢复的回收站，补上 DSH 本身没有的删除能力。",
   "icon": "icon.svg",
   "type": "module",
   "engines": {
@@ -12,7 +12,9 @@
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
   },
   "dsh": {
     "manifestVersion": 1,
@@ -31,7 +33,9 @@
     "cordis.patch.yml",
     "icon.svg",
     "README.md",
-    "docs"
+    "docs",
+    "locale/*.json",
+    "assets/*.png"
   ],
   "scripts": {
     "test": "node --test --test-concurrency=1 \"tests/host/*.test.js\" \"tests/client/*.test.js\" \"tests/integration/*.test.js\"",
@@ -46,5 +50,13 @@
     "delete",
     "recycle-bin"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chuilian/dsh-session-trash.git"
+  },
+  "homepage": "https://github.com/chuilian/dsh-session-trash#readme",
+  "bugs": {
+    "url": "https://github.com/chuilian/dsh-session-trash/issues"
+  }
 }

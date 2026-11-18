@@ -132,7 +132,7 @@ ctx.sessionPersistence.flush()            // 全后端持久化屏障
 
 ```
 <root>/                                  # ~/.dsh/sessions
-  /--Users-example-Desktop-work-~7814~7A76--/     # projectKey(cwd)
+  --Users-example-Desktop-work-~7814~7A76--/     # projectKey(cwd)
     session-155e353b-8902-49bb-824a-bb64c1936631/          # encodeSegment(id)
       session.v4.jsonl.zstd                                # 当前世代日志
       session.lock
@@ -148,13 +148,13 @@ encodeSegment(raw)
 projectKey(cwd)
 ```
 
-回归锚点是本机真实目录名，不是构造的样例：
+回归锚点是真实后端目录名的同形中性样例（保留 ASCII+CJK 与纯 CJK 两种形态）：
 
 ```js
 projectKey("/Users/example/Desktop/work/研究")
-  === "/--Users-example-Desktop-work-~7814~7A76--"
+  === "--Users-example-Desktop-work-~7814~7A76--"
 projectKey("/Users/example/Desktop/work/插件")
-  === "/--Users-example-Desktop-work-~63D2~4EF6--"
+  === "--Users-example-Desktop-work-~63D2~4EF6--"
 ```
 
 ---
@@ -634,7 +634,7 @@ const storeSeat = { ...storeHandle, create: () => storeInstance };
 ▼ [✓] project-alpha   /Users/example/Desktop/work/project-alpha      已选 3/12
       ☑ 数据库迁移方案评审
       ☐ 安装记录
-▶ [ ] project-beta      /Users/example/Desktop/work/project-beta            8 个会话
+▶ [ ] project-beta    /Users/example/Desktop/work/project-beta            8 个会话
 ▶ [ ] 未分组                                                              2 个会话
 ```
 
@@ -643,7 +643,7 @@ const storeSeat = { ...storeHandle, create: () => storeInstance };
 - **分区是呈现层，不碰删除语义。** 选中集合、请求体、逐项结果与原因都与分区无关；分区只是把同一批行
   换一种排法。纯函数（`partitionPlans` / `toggleCollapsed` / `groupSelection` / `workspaceKey` /
   `workspaceName`）与渲染分开，因此这套逻辑在没有 DOM 的情况下也能测。
-- **分区键是路径，不是目录名。** 两个不同目录下同名的 `project-alpha` 必须是两个分区，所以键取完整路径
+- **分区键是路径，不是目录名。** 两个不同目录下同名的 `project-x` 必须是两个分区，所以键取完整路径
   （去掉尾部斜杠），标题才是目录名，完整路径并排显示。
 - **组复选框只有全选/全不选两种状态。** 原语没有「半选」可渲染，于是部分选中时显示「已选 3/12」
   而不是把复选框画成全选或全不选——那两种都会说谎。
@@ -831,7 +831,7 @@ CSS 全部使用 DSH 自己的设计令牌（`--dsw-alias-label-primary`、`--ds
 取证（全程只读）：
 
 - 回收站日志：`trash … forced=true released=true` → 39 秒后 `restore … ok`，`actor: session-menu`。
-- 该会话目录 `~/.dsh/sessions/--Users-…-project-alpha--/session-78dfc5b9-…/` 当天**零写入**；日志末行停在
+- 该会话目录 `~/.dsh/sessions/--Users-…-project-x--/session-78dfc5b9-…/` 当天**零写入**；日志末行停在
   前一天 22:17 的 `model/selection`（seq 982）。同工作区其它会话在同一时段正常落盘，同一条提示词在
   别的会话里得到正常回应——不是模型、不是提示词，也不是宿主进程坏了。
 - `lsof` 显示该会话的 `session.lock` 与日志**没有任何进程持有**，而同时其它 13 个活会话的锁都握在

@@ -59,8 +59,8 @@
 
 | # | 用例 | 断言要点 |
 |---|---|---|
-| 1 | 复刻真实 ASCII+CJK 工作区目录名 | 与本机实际目录 `/--Users-example-Desktop-work-~7814~7A76--` 逐字符相等 |
-| 2 | 复刻第二个真实目录名 | `/--Users-example-Desktop-work-~63D2~4EF6--` |
+| 1 | 复刻 ASCII+CJK 工作区目录名 | 与真实后端同形的样例 `--Users-example-Desktop-work-~7814~7A76--` 逐字符相等 |
+| 2 | 复刻第二个目录名（纯 CJK 尾段） | `--Users-example-Desktop-work-~63D2~4EF6--` |
 | 3 | 分隔符连续折叠、去前导 `-` | `/a//b///c` → `--a-b-c--`；`/` → `--root--` |
 | 4 | 驱动器分隔符同路径分隔符 | `C:\Users\x` → `--C-Users-x--` |
 | 5 | 不安全字符转义 | 空格 → `~0020`；`~` → `~007E` |

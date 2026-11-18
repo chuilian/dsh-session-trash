@@ -3,6 +3,10 @@
 
 > 给 DSH Web GUI 的会话删除功能：**两步确认 + 批量删除 + 可恢复回收站**。
 > DSH 本身只能归档会话，无法删除；本插件在不修改 DSH 源码的前提下补上这个能力。
+>
+> Adds the session deletion DSH does not ship: a two-step confirmation, batch
+> selection with search, and a recoverable recycle bin — a deleted session can be
+> restored until it is purged for good.
 
 [English summary](#english-summary) · [功能规格](docs/SPEC.md) · [架构设计](docs/ARCHITECTURE.md) · [测试计划](docs/TEST-PLAN.md)
 
@@ -23,86 +27,57 @@ DSH 侧栏的会话菜单只有 **置顶 / 重命名 / 分叉 / 归档** 四项�
 
 ---
 
-## 这个插件装在哪里
+## 仓库与运行形态
 
-本插件与其他自研插件统一住在 **`~/.dsh/plugins/`**，profile 用 `link:` 直连，不经过任何中间目录：
+本插件**零运行时依赖、无构建步骤**：`lib/**` 既是源码，也是安装后实际运行的产物。
+克隆下来即可直接运行，`npm install` 不是必需步骤。
 
-```
-~/.dsh/plugins/dsh-session-trash/                        ← 真实文件 + git 仓（源码即运行代码，无构建步骤）
-~/.dsh/profiles/desktop/package.json                     ← 声明 link: 指向上面这个路径
-~/.dsh/profiles/desktop/pnpm-lock.yaml                   ← importers 段同步写 link:
-~/.dsh/profiles/desktop/node_modules/dsh-session-trash   ← 符号链接 → 上面这个路径
-~/.dsh/plugins/dsh-session-trash/              ← 可选入口软链，删掉不影响运行
-```
-
-git 仓就住在 `~/.dsh/plugins/dsh-session-trash/.git`，所以「删掉工作区」只删掉入口软链，
-插件本体和版本历史都在。2026-10-19 曾在工作区短暂停留一天，当晚搬回 `~/.dsh/plugins/`。
-
-**DSH 自己的备份范围**（`~/.dsh/profile-backups/`）只覆盖 profile 的**配置**：`cordis.yml`、`package.json`、
-`pnpm-lock.yaml`、`compatibility.json`。它**不备份** `node_modules`，也不备份任何插件源码 ——
-所以插件源码的持久化由 GitHub 仓库 `chuilian/dsh-session-trash` 承担（源码含 `lib/` 全部入库，
-克隆下来即可直接运行，无需安装依赖）。反过来，**删掉工作区的软链入口对插件没有任何影响**：
-profile 的软链直连 `~/.dsh/plugins/dsh-session-trash/`，不经过工作区。
-
-### 改位置 / 恢复
-
-**登记分散在四处，漏改任何一处都会在下次 `pnpm install` 时被顶掉** —— 必须一次改全：
-
-| 位置 | 现状 |
-| --- | --- |
-| `~/.dsh/profiles/<profile>/package.json` → `dependencies` | `"dsh-session-trash": "link:/absolute/path/to/dsh-session-trash"` |
-| `~/.dsh/profiles/<profile>/pnpm-lock.yaml` → `importers` 段 | `specifier: link:/absolute/path/to/dsh-session-trash` + `version: link:../../plugins/dsh-session-trash` |
-| `~/.dsh/profiles/<profile>/node_modules/dsh-session-trash` | 指向 `~/.dsh/plugins/dsh-session-trash` 的软链 |
-| `~/.dsh/profiles/<profile>/package.json` → `dsh.profile.bundles` | 包名 `dsh-session-trash`（纯包名，不含路径，通常不用改） |
-
-2026-10-25 起原先统一改写这四处的登记工具（`relink.sh` / `verify.sh`）已移除，改为手工维护；
-改完按上表逐条核对。动手前先把 `package.json` 与 `pnpm-lock.yaml` 备份到
-`~/.dsh/backups/profile/`。
+DSH 自己的备份范围（`~/.dsh/profile-backups/`）只覆盖 profile 的**配置**：`cordis.yml`、
+`package.json`、`pnpm-lock.yaml`、`compatibility.json`。它**不备份** `node_modules`，
+也不备份任何插件源码 —— 源码的持久化由本仓库承担。
 
 ## 安装
 
 ### 前置条件
 
-- DSH `>= 0.2.0-rc.1`（本插件在 `0.2.0-rc.2` / profile `desktop` 上开发与测试）
+- DSH `>= 0.2.0-rc.1`
 - Node.js `>= 22.19`（DSH 自带运行时即满足）
 - **无需联网**：插件零运行时依赖，宿主端只用 Node 内置模块，浏览器端只用 DSH 平台自带的模块
 
-> ⚠️ **不要用 `dsh plugin add`，也不要在装完之后跑 `pnpm install`。**
-> 本机的插件管理器命令会报 `ERR_PNPM_RESOLUTION_POLICY_VIOLATIONS_UNHANDLED`
-> （`minimumReleaseAge` 策略缺 `no handleResolutionPolicyViolations` 回调），失败发生在写盘之前、
-> 零副作用，但它意味着这条路根本走不通。而 `pnpm install` 更危险：它会按 lock 重算
-> `node_modules`，把 `link:` 软链顶回 registry 版本 —— `dsh-genui` 真的因此被换回 0.12.0，
-> 并被塞进一棵 428MB 的依赖树。
+### 方式一：从 GitHub 安装（推荐）
 
-### 方式一：手工编辑 profile
-
-编辑 `~/.dsh/profiles/<profile>/package.json`：
-
-```json
-{
-  "dependencies": {
-    "dsh-session-trash": "link:/absolute/path/to/dsh-session-trash"
-  },
-  "dsh": {
-    "profile": {
-      "bundles": [
-        "...原有的 bundle 保持不变...",
-        "dsh-session-trash"
-      ]
-    }
-  }
-}
+```bash
+dsh plugin --profile <profile> add github:chuilian/dsh-session-trash
 ```
 
-**但只改这里是不够的。** `package.json` 之外还必须同步两处，漏任何一处都会被下一次
-`pnpm install` 顶掉：
+也可以在 Web GUI 的插件管理器里填同一个来源。安装完成后刷新页面即可。
 
-1. `pnpm-lock.yaml` 的 `importers` 段写两行
-   `specifier: link:/absolute/path/to/dsh-session-trash` +
-   `version: link:<相对 profile 的路径>`
-2. `node_modules/dsh-session-trash` 建成指向工作区的**相对**软链
+### 方式二：从源码目录安装（开发用）
 
-然后重启 DSH。不跑 `pnpm install`。想省事就直接用方式一。
+把仓库克隆到本地，再让 profile 直连该目录：
+
+```bash
+git clone https://github.com/chuilian/dsh-session-trash.git
+dsh plugin --profile <profile> add link:/absolute/path/to/dsh-session-trash
+```
+
+`link:` 方式的登记分散在四处，漏改任何一处都会在下次 `pnpm install` 时被顶掉 —— 必须一次改全：
+
+| 位置 | 登记内容 |
+| --- | --- |
+| `~/.dsh/profiles/<profile>/package.json` → `dependencies` | `"dsh-session-trash": "link:/absolute/path/to/dsh-session-trash"` |
+| `~/.dsh/profiles/<profile>/pnpm-lock.yaml` → `importers` 段 | `specifier: link:/absolute/path/to/dsh-session-trash` + `version: link:<相对 profile 的路径>` |
+| `~/.dsh/profiles/<profile>/node_modules/dsh-session-trash` | 指向源码目录的**相对**软链 |
+| `~/.dsh/profiles/<profile>/package.json` → `dsh.profile.bundles` | 包名 `dsh-session-trash`（纯包名，不含路径，通常不用改） |
+
+改完按上表逐条核对，再重启 DSH。
+
+> ⚠️ **装完之后不要在同一个 profile 里跑 `pnpm install`。**
+> 它会按 lock 重算 `node_modules`，把 `link:` 软链顶回 registry 版本。
+> 如果你的插件管理器报 `ERR_PNPM_RESOLUTION_POLICY_VIOLATIONS_UNHANDLED`
+> （`minimumReleaseAge` 策略缺 `no handleResolutionPolicyViolations` 回调），
+> 用上面的方式二手工登记即可绕过。
+
 
 ### 安装后验证
 
@@ -227,7 +202,7 @@ rm -rf ~/.dsh/session-trash
   name: 'dsh-session-trash'
   config:
     enabled: true
-    root: /~/.dsh/session-trash
+    root: ~/.dsh/session-trash
     retentionDays: 30
     maxBatch: 100
     quickDelete: true
@@ -377,7 +352,7 @@ rm -rf ~/.dsh/session-trash
 ## 开发
 
 ```bash
-cd "~/.dsh/plugins/dsh-session-trash"
+cd dsh-session-trash   # 克隆下来的仓库目录
 
 # 全部测试（137 个必测项，无需 npm install；串行执行以保证确定性）
 node --test --test-concurrency=1 "tests/host/*.test.js" "tests/client/*.test.js" "tests/integration/*.test.js"

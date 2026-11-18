@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session recycle bin",
+    "description": "Adds the session deletion DSH does not ship: a two-step confirmation, batch selection, and a recoverable recycle bin for the sessions in the sidebar."
+  }
+}

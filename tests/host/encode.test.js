@@ -1,9 +1,10 @@
 /**
  * Encoding tests.
  *
- * The first two cases are not invented: they are the real directory names this
- * machine's DSH produced for two real workspaces. They are the regression anchor
- * that keeps the reimplemented encoding honest against the shipped backend.
+ * The first two cases keep the shape of real backend output — one ASCII+CJK
+ * workspace directory and one CJK-only trailing segment — but the paths are
+ * neutralized samples. They are the regression anchor that keeps the
+ * reimplemented encoding honest against the shipped backend.
  */
 
 import assert from "node:assert/strict";
@@ -11,15 +12,15 @@ import test from "node:test";
 
 import { encodeSegment, projectKey } from "../../lib/host/encode.js";
 
-test("projectKey reproduces a real ASCII+CJK workspace directory", () => {
+test("projectKey reproduces an ASCII+CJK workspace directory", () => {
   assert.equal(
     projectKey("/Users/example/Desktop/work/研究"),
-    "/--Users-example-Desktop-work-~7814~7A76--"
+    "--Users-example-Desktop-work-~7814~7A76--"
   );
 });
 
-test("projectKey reproduces a second real workspace directory", () => {
-  assert.equal(projectKey("/Users/example/Desktop/work/插件"), "/--Users-example-Desktop-work-~63D2~4EF6--");
+test("projectKey reproduces a second workspace directory", () => {
+  assert.equal(projectKey("/Users/example/Desktop/work/插件"), "--Users-example-Desktop-work-~63D2~4EF6--");
 });
 
 test("projectKey collapses separator runs and strips leading dashes", () => {
